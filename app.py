@@ -32,32 +32,46 @@ def get_worksheets():
     ws_users = sh.worksheet("users")
     ws_reports = sh.worksheet("reports")
     
+    expected_report_headers = [
+        "report_id", "submit_time", "report_date", "username", "name",
+        "work_start", "work_end", 
+        "pack_start", "pack_end", "pack_count", "pack_duration_min", "min_per_pack",
+        "cs_start", "cs_end", "ship_count", "live_start", "live_end",
+        "has_complaint", "c_who", "c_where", "c_when", "c_what", "c_why", "c_how",
+        "has_8d", "file_8d_name", "file_8d_b64",
+        "daily_tasks", "improvement_proposal", "peer_feedback"
+    ]
+    
     # 自動檢查並初始化標題列
     if not ws_users.row_values(1):
         ws_users.append_row(["username", "password_hash", "name", "email", "role", "created_at"])
         admin_pass = hashlib.sha256("admin888".encode()).hexdigest()
         ws_users.append_row(["admin", admin_pass, "系統管理員", st.secrets["smtp"]["sender_email"], "admin", str(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))])
         
-    if not ws_reports.row_values(1):
-        ws_reports.append_row([
-            "report_id", "submit_time", "report_date", "username", "name",
-            "work_start", "work_end", 
-            "pack_start", "pack_end", "pack_count", "pack_duration_min", "min_per_pack",
-            "cs_start", "cs_end", "ship_count", "live_start", "live_end",
-            "has_complaint", "c_who", "c_where", "c_when", "c_what", "c_why", "c_how",
-            "has_8d", "file_8d_name", "file_8d_b64",
-            "daily_tasks", "improvement_proposal", "peer_feedback"
-        ])
+    current_r_headers = ws_reports.row_values(1)
+    if not current_r_headers:
+        ws_reports.append_row(expected_report_headers)
+    elif len(current_r_headers) != len(set(current_r_headers)):
+        # 自動修復試算表第一列若不小心產生重複標題的問題
+        ws_reports.update("A1:AD1", [expected_report_headers])
+        
     return ws_users, ws_reports
 
-# 防呆讀取函數（徹底解決 GSpreadException 標題列問題）
+# 防呆讀取函數（徹底解決 GSpreadException 與 Duplicate column names 問題）
 def safe_get_df(ws):
     all_vals = ws.get_all_values()
     if not all_vals or len(all_vals) <= 1:
         return pd.DataFrame()
     headers = [h.strip() for h in all_vals[0]]
-    valid_cols = [i for i, h in enumerate(headers) if h != ""]
-    clean_headers = [headers[i] for i in valid_cols]
+    valid_cols = []
+    clean_headers = []
+    seen = set()
+    for i, h in enumerate(headers):
+        if h != "" and h not in seen:
+            valid_cols.append(i)
+            clean_headers.append(h)
+            seen.add(h)
+            
     data = []
     for r in all_vals[1:]:
         if not any(str(cell).strip() for cell in r):
@@ -66,12 +80,11 @@ def safe_get_df(ws):
         data.append([row_padded[i] for i in valid_cols])
     return pd.DataFrame(data, columns=clean_headers)
 
-# 根據帳號名稱精準尋找在 Google Sheet 中的第幾列（避免刪除或空白列造成錯位）
 def find_user_row_idx(ws_users, target_username):
-    col_vals = ws_users.col_values(1) # 第一欄為 username
+    col_vals = ws_users.col_values(1)
     for idx, val in enumerate(col_vals):
         if idx > 0 and val.strip() == str(target_username).strip():
-            return idx + 1 # gspread 列數從 1 開始
+            return idx + 1
     return None
 
 # ================= 2. 輔助與安全函數 =================
@@ -414,7 +427,6 @@ else:
         st.divider()
         col_m1, col_m2 = st.columns(2)
         
-        # 左欄：修改權限、強制改密碼、刪除帳號
         with col_m1:
             st.subheader("🛡️ 調整現有帳號權限 / 重設密碼")
             if not users_df.empty:
@@ -424,7 +436,6 @@ else:
                 target_row = users_df.iloc[target_idx]
                 target_uname = target_row["username"]
                 
-                # 1. 權限調整
                 st.markdown("##### 1️⃣ 變更系統權限")
                 new_role = st.radio(
                     "選擇賦予該帳號的權限等級：",
@@ -446,7 +457,6 @@ else:
                             st.rerun()
                             
                 st.markdown("---")
-                # 2. 管理員手動重設該員工密碼
                 st.markdown("##### 2️⃣ 強制設定新密碼 (免信箱驗證)")
                 force_pass = st.text_input("輸入要幫該同仁設定的新密碼", placeholder="例如：gold8888", key="f_pass")
                 if st.button("🔑 直接更新該帳號密碼"):
@@ -459,7 +469,6 @@ else:
                             st.success(f"✅ 已成功將 **{target_row['name']}** 的密碼重設為：`{force_pass.strip()}`")
 
                 st.markdown("---")
-                # 3. 刪除帳號
                 st.markdown("##### 3️⃣ 移除離職或誤建帳號")
                 confirm_del = st.checkbox(f"我確認要永久刪除「{target_row['name']} ({target_uname})」的帳號")
                 if st.button("🗑️ 刪除此帳號", disabled=not confirm_del):
@@ -472,7 +481,6 @@ else:
                             st.success(f"✅ 已刪除帳號：{target_row['name']} ({target_uname})")
                             st.rerun()
 
-        # 右欄：管理員直接新增帳號（設定預設密碼）
         with col_m2:
             st.subheader("➕ 由後台直接幫同仁建立帳號")
             st.caption("您可以先幫同仁建好帳號與預設密碼，同仁登入後可自行修改密碼。")
@@ -549,11 +557,80 @@ else:
                 st.dataframe(summary_df, use_container_width=True)
             
             st.divider()
+
+            # 2. 每日回報詳細內容卡片檢視區（清楚閱讀每位同仁送出的所有細節）
+            st.subheader("📋 每日回報詳細內容檢視（點擊可展開/收合）")
+            st.caption("預設為您展開最新一筆回報，方便直接清楚閱讀時段明細、客訴 5W1H、提案與回饋內容。")
             
-            # 2. 匯出報表功能 (Excel)
-            st.subheader("📥 匯出明細報表 (Excel / 供轉存 PDF)")
-            export_df = filtered_df.drop(columns=["file_8d_b64"], errors="ignore").rename(columns={
-                "submit_time": "送出時間", "report_date": "回報日期", "name": "姓名",
+            # 依日期與送出時間由新到舊排序
+            sorted_df = filtered_df.iloc[::-1].reset_index(drop=True)
+            for idx, row in sorted_df.iterrows():
+                alert_badge = " 🚨【有客訴】" if row.get("has_complaint") == "有" else ""
+                badge_8d = " 📎【附8D報告】" if row.get("has_8d") == "是" else ""
+                exp_title = f"📅 {row.get('report_date', '')} ｜ 👤 {row.get('name', '')} ｜ 🕒 上下班：{row.get('work_start', '')}~{row.get('work_end', '')} ｜ 📦 包貨：{int(row.get('pack_count', 0))}件 / 🚚 寄貨：{int(row.get('ship_count', 0))}件{alert_badge}{badge_8d}"
+                
+                with st.expander(exp_title, expanded=(idx == 0)):
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.markdown(f"**🕒 出勤時間**\n\n`{row.get('work_start', '')} ~ {row.get('work_end', '')}`")
+                    if int(row.get("pack_count", 0)) > 0:
+                        c2.markdown(f"**📦 包貨紀錄**\n\n`{row.get('pack_start', '')} ~ {row.get('pack_end', '')}`\n共 **{int(row.get('pack_count', 0))}** 件 (平均 `{row.get('min_per_pack', 0)}` 分/件)")
+                    else:
+                        c2.markdown("**📦 包貨紀錄**\n\n`無`")
+                    c3.markdown(f"**🚚 今日寄貨 / 💬 客服時段**\n\n寄貨：**{int(row.get('ship_count', 0))}** 件\n客服：`{row.get('cs_start', '無')} ~ {row.get('cs_end', '無')}`")
+                    c4.markdown(f"**🎥 直播時段**\n\n`{row.get('live_start', '無')} ~ {row.get('live_end', '無')}`")
+                    
+                    st.markdown("---")
+                    st.markdown("#### 📝 今日處理事項明細")
+                    tasks_text = str(row.get("daily_tasks", "")).strip()
+                    if tasks_text:
+                        for line in tasks_text.split("\n"):
+                            st.markdown(f"- {line}")
+                    else:
+                        st.caption("無填寫內容")
+                        
+                    col_p1, col_p2 = st.columns(2)
+                    with col_p1:
+                        st.markdown("#### 💡 提案改善")
+                        prop_text = str(row.get("improvement_proposal", "")).strip()
+                        if prop_text:
+                            st.info(prop_text)
+                        else:
+                            st.caption("無提案")
+                    with col_p2:
+                        st.markdown("#### 🤝 針對其他同仁想法")
+                        peer_text = str(row.get("peer_feedback", "")).strip()
+                        if peer_text:
+                            st.warning(peer_text)
+                        else:
+                            st.caption("無填寫")
+                            
+                    if row.get("has_complaint") == "有":
+                        st.markdown("---")
+                        st.error("🚨 **客訴案件 5W1H 詳細報告**")
+                        st.markdown(f"- **1. 【Who】客人本名 + TK名：** {row.get('c_who', '')}")
+                        st.markdown(f"- **2. 【Where】發生管道：** {row.get('c_where', '')}")
+                        st.markdown(f"- **3. 【When】訂單與客訴日期：** {row.get('c_when', '')}")
+                        st.markdown(f"- **4. 【What】發生什麼事 / 商品問題：**\n  > {row.get('c_what', '')}")
+                        st.markdown(f"- **5. 【Why】客訴背後原因：**\n  > {row.get('c_why', '')}")
+                        st.markdown(f"- **6. 【How】解決方案與未來改善：**\n  > {row.get('c_how', '')}")
+                        
+                    if row.get("has_8d") == "是" and row.get("file_8d_b64"):
+                        st.markdown("---")
+                        b64_bytes = base64.b64decode(row["file_8d_b64"])
+                        st.download_button(
+                            label=f"📎 點擊下載 8D 報告檔案 ({row.get('file_8d_name', '8D_report')})",
+                            data=b64_bytes,
+                            file_name=row.get("file_8d_name", "8D_report"),
+                            key=f"dl_card_{row.get('report_id', idx)}"
+                        )
+                    st.caption(f"系統回報單號：{row.get('report_id', '')} ｜ 實際送出時間：{row.get('submit_time', '')}")
+
+            st.divider()
+            
+            # 3. 匯出報表功能 (Excel) 與總表預覽
+            st.subheader("📥 匯出完整明細報表 (Excel / 供轉存 PDF)")
+            export_df = filtered_df.drop(columns=["file_8d_b64", "月份"], errors="ignore").rename(columns={
+                "report_id": "單號", "submit_time": "送出時間", "report_date": "回報日期", "username": "帳號", "name": "姓名",
                 "work_start": "上班時間", "work_end": "下班時間",
                 "pack_start": "包貨開始", "pack_end": "包貨結束", "pack_count": "包貨件數",
                 "pack_duration_min": "包貨總分鐘", "min_per_pack": "單件包貨耗時(分)",
@@ -564,6 +641,8 @@ else:
                 "has_8d": "有無8D", "file_8d_name": "8D檔名",
                 "daily_tasks": "今日處理事項", "improvement_proposal": "提案改善", "peer_feedback": "對同仁想法"
             })
+            # 確保欄位名稱絕對唯一，防止任何重複欄位錯誤
+            export_df = export_df.loc[:, ~export_df.columns.duplicated()]
             
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -579,19 +658,5 @@ else:
                 type="primary"
             )
             
-            st.dataframe(export_df, use_container_width=True)
-            
-            # 3. 8D 檔案下載專區
-            df_8d = filtered_df[filtered_df["has_8d"] == "是"]
-            if not df_8d.empty:
-                st.divider()
-                st.subheader("📎 重大異常 8D 報告檔案下載區")
-                for idx, row in df_8d.iterrows():
-                    if row["file_8d_b64"]:
-                        b64_bytes = base64.b64decode(row["file_8d_b64"])
-                        st.download_button(
-                            label=f"下載 {row['report_date']} - {row['name']} 的 8D 檔案 ({row['file_8d_name']})",
-                            data=b64_bytes,
-                            file_name=row["file_8d_name"],
-                            key=f"dl_{row['report_id']}"
-                        )
+            with st.expander("🔍 點擊展開查看「試算表總覽模式」"):
+                st.dataframe(export_df, use_container_width=True)
