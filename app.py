@@ -35,7 +35,6 @@ def get_worksheets():
     # 自動檢查並初始化標題列
     if not ws_users.row_values(1):
         ws_users.append_row(["username", "password_hash", "name", "email", "role", "created_at"])
-        # 預設建立一組最高管理員帳號：admin / 密碼：admin888
         admin_pass = hashlib.sha256("admin888".encode()).hexdigest()
         ws_users.append_row(["admin", admin_pass, "系統管理員", st.secrets["smtp"]["sender_email"], "admin", str(datetime.datetime.now())])
         
@@ -51,6 +50,22 @@ def get_worksheets():
         ])
     return ws_users, ws_reports
 
+# 防呆讀取函數（徹底解決 GSpreadException 標題列問題）
+def safe_get_df(ws):
+    all_vals = ws.get_all_values()
+    if not all_vals or len(all_vals) <= 1:
+        return pd.DataFrame()
+    headers = [h.strip() for h in all_vals[0]]
+    valid_cols = [i for i, h in enumerate(headers) if h != ""]
+    clean_headers = [headers[i] for i in valid_cols]
+    data = []
+    for r in all_vals[1:]:
+        if not any(str(cell).strip() for cell in r):
+            continue # 跳過完全空白的列
+        row_padded = r + [""] * max(0, len(headers) - len(r))
+        data.append([row_padded[i] for i in valid_cols])
+    return pd.DataFrame(data, columns=clean_headers)
+
 # ================= 2. 輔助與安全函數 =================
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
@@ -58,7 +73,7 @@ def hash_password(password):
 def calc_minutes(t_start, t_end):
     dt1 = datetime.datetime.combine(datetime.date.today(), t_start)
     dt2 = datetime.datetime.combine(datetime.date.today(), t_end)
-    if dt2 < dt1: # 跨午夜處理
+    if dt2 < dt1:
         dt2 += datetime.timedelta(days=1)
     return round((dt2 - dt1).total_seconds() / 60.0, 2)
 
@@ -107,7 +122,7 @@ if not st.session_state.logged_in:
         login_user = st.text_input("帳號", key="l_user")
         login_pass = st.text_input("密碼", type="password", key="l_pass")
         if st.button("登入", type="primary"):
-            users_df = pd.DataFrame(ws_users.get_all_records())
+            users_df = safe_get_df(ws_users)
             if not users_df.empty and login_user in users_df["username"].values:
                 user_row = users_df[users_df["username"] == login_user].iloc[0]
                 if user_row["password_hash"] == hash_password(login_pass):
@@ -133,7 +148,7 @@ if not st.session_state.logged_in:
             elif reg_pass1 != reg_pass2:
                 st.error("❌ 兩次輸入的密碼不一致，請重新確認！")
             else:
-                users_df = pd.DataFrame(ws_users.get_all_records())
+                users_df = safe_get_df(ws_users)
                 if not users_df.empty and reg_user in users_df["username"].values:
                     st.error("❌ 此帳號已被註冊，請換一個！")
                 else:
@@ -147,16 +162,19 @@ if not st.session_state.logged_in:
         fp_user = st.text_input("請輸入您的帳號")
         fp_email = st.text_input("請輸入註冊時綁定的信箱")
         if st.button("寄送重設密碼信"):
-            users_df = pd.DataFrame(ws_users.get_all_records())
-            match = users_df[(users_df["username"] == fp_user) & (users_df["email"] == fp_email)]
-            if not match.empty:
-                new_temp_pass = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-                row_idx = int(match.index[0]) + 2 # 加上標題列與0起始偏移
-                ws_users.update_cell(row_idx, 2, hash_password(new_temp_pass))
-                if send_reset_email(fp_email, new_temp_pass):
-                    st.success("✅ 臨時新密碼已寄出！請至信箱收信並重新登入。")
+            users_df = safe_get_df(ws_users)
+            if not users_df.empty:
+                match = users_df[(users_df["username"] == fp_user) & (users_df["email"] == fp_email)]
+                if not match.empty:
+                    new_temp_pass = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+                    row_idx = int(match.index[0]) + 2
+                    ws_users.update_cell(row_idx, 2, hash_password(new_temp_pass))
+                    if send_reset_email(fp_email, new_temp_pass):
+                        st.success("✅ 臨時新密碼已寄出！請至信箱收信並重新登入。")
+                else:
+                    st.error("❌ 帳號與綁定信箱不符合！")
             else:
-                st.error("❌ 帳號與綁定信箱不符合！")
+                st.error("❌ 系統尚無使用者資料！")
 
 # ================= 5. 已登入畫面 =================
 else:
@@ -270,7 +288,6 @@ else:
         peer_feedback = st.text_area("🤝 針對其他同仁有任何想法或建議 (僅主管後台可見)")
 
         if st.button("🚀 確認無誤，送出今日回報", type="primary", use_container_width=True):
-            # 驗證客訴必填
             if has_complaint == "有" and not all([c_who, c_when, c_what, c_why, c_how]):
                 st.error("❌ 您勾選了「有客訴」，請將 Who / When / What / Why / How 所有欄位填寫完整！")
             elif has_8d and not file_8d_name:
@@ -324,7 +341,7 @@ else:
             elif hash_password(old_p) != user["password_hash"]:
                 st.error("❌ 舊密碼輸入錯誤！")
             else:
-                users_df = pd.DataFrame(ws_users.get_all_records())
+                users_df = safe_get_df(ws_users)
                 row_idx = int(users_df[users_df["username"] == user["username"]].index[0]) + 2
                 new_hash = hash_password(new_p1)
                 ws_users.update_cell(row_idx, 2, new_hash)
@@ -335,11 +352,15 @@ else:
     elif choice == "📊 主管後台數據中心" and user["role"] == "admin":
         st.title("📊 黃金部門 - 主管後台數據中心")
         
-        records = ws_reports.get_all_records()
-        if not records:
-            st.info("目前尚無任何同仁提交回報資料。")
+        df = safe_get_df(ws_reports)
+        if df.empty:
+            st.info("目前尚無任何同仁提交回報資料。您可以先點選左側「📝 每日工作回報」測試送出一筆！")
         else:
-            df = pd.DataFrame(records)
+            # 確保數值欄位轉為數字型態，方便統計加總
+            for col in ["pack_count", "pack_duration_min", "min_per_pack", "ship_count"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+                    
             df["月份"] = df["report_date"].astype(str).str.slice(0, 7)
             
             # 篩選器
