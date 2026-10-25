@@ -17,6 +17,17 @@ from openpyxl.styles import Font, PatternFill, Alignment
 # 頁面基本設定
 st.set_page_config(page_title="黃金部門工作回報系統", layout="wide", page_icon="✨")
 
+# 設定台灣標準時區 (UTC+8)
+TW_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+def get_tw_now():
+    """取得台灣目前的準確日期與時間 (UTC+8)"""
+    return datetime.datetime.now(TW_TZ)
+
+def get_tw_today():
+    """取得台灣目前的準確日期 (UTC+8)"""
+    return get_tw_now().date()
+
 # 標準中文標題列定義
 REPORT_HEADERS = [
     "回報單號", "送出時間", "回報日期", "帳號", "姓名",
@@ -47,8 +58,8 @@ def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 def calc_minutes(t_start, t_end):
-    dt1 = datetime.datetime.combine(datetime.date.today(), t_start)
-    dt2 = datetime.datetime.combine(datetime.date.today(), t_end)
+    dt1 = datetime.datetime.combine(get_tw_today(), t_start)
+    dt2 = datetime.datetime.combine(get_tw_today(), t_end)
     if dt2 < dt1:
         dt2 += datetime.timedelta(days=1)
     return round((dt2 - dt1).total_seconds() / 60.0, 2)
@@ -120,7 +131,7 @@ def get_worksheets_cached():
     if not u_headers:
         ws_users.append_row(["登入帳號", "密碼雜湊", "真實姓名", "綁定信箱", "系統權限", "建立時間"])
         admin_pass = hashlib.sha256("admin888".encode()).hexdigest()
-        ws_users.append_row(["admin", admin_pass, "系統管理員", st.secrets["smtp"]["sender_email"], "admin", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+        ws_users.append_row(["admin", admin_pass, "系統管理員", st.secrets["smtp"]["sender_email"], "admin", get_tw_now().strftime("%Y-%m-%d %H:%M:%S")])
     elif u_headers[0] == "username":
         ws_users.update("A1:F1", [["登入帳號", "密碼雜湊", "真實姓名", "綁定信箱", "系統權限", "建立時間"]])
 
@@ -399,7 +410,7 @@ if not st.session_state.logged_in:
                     st.error("❌ 此帳號已被註冊，請換一個！")
                 else:
                     ws_users.append_row([
-                        reg_user.strip(), hash_password(reg_pass1), reg_name.strip(), reg_email.strip(), "staff", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        reg_user.strip(), hash_password(reg_pass1), reg_name.strip(), reg_email.strip(), "staff", get_tw_now().strftime("%Y-%m-%d %H:%M:%S")
                     ])
                     clear_all_caches()
                     st.success("✅ 註冊成功！請切換至「登入系統」分頁進行登入。")
@@ -430,6 +441,7 @@ else:
     user = st.session_state.user_info
     st.sidebar.title(f"👋 您好，{user['name']}")
     st.sidebar.caption(f"身份：{'👑 管理員' if user['role'] == 'admin' else '👤 部門同仁'}")
+    st.sidebar.caption(f"🕒 台灣時間：{get_tw_now().strftime('%Y-%m-%d %H:%M')}")
     
     menu_options = ["📝 每日工作回報", "🔒 修改密碼"]
     if user["role"] == "admin":
@@ -454,7 +466,7 @@ else:
         st.info(f"📌 填表人：**{user['name']}** ｜ 💡 **防呆提示**：若您發現今天送出的內容有誤，只要選同一個日期**直接重新填寫並送出**，系統就會自動幫您刪除舊的那筆、覆蓋為最新內容！")
         
         fv = st.session_state.form_ver
-        report_date = st.date_input("📅 回報歸屬日期", datetime.date.today(), key=f"rdate_{fv}")
+        report_date = st.date_input("📅 回報歸屬日期 (預設為台灣今日)", get_tw_today(), key=f"rdate_{fv}")
         
         df_check = load_reports_df()
         already_submitted = False
@@ -597,10 +609,11 @@ else:
             else:
                 was_overwritten = delete_existing_same_day_report(ws_reports, user["username"], str(report_date))
                 
-                report_id = datetime.datetime.now().strftime("%Y%m%d%H%M%S") + "_" + user["username"]
+                now_tw = get_tw_now()
+                report_id = now_tw.strftime("%Y%m%d%H%M%S") + "_" + user["username"]
                 ws_reports.append_row([
                     report_id,
-                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    now_tw.strftime("%Y-%m-%d %H:%M:%S"),
                     str(report_date),
                     user["username"],
                     user["name"],
@@ -634,9 +647,9 @@ else:
                 st.session_state.task_rows = 1
                 st.session_state.form_ver += 1
                 if was_overwritten:
-                    st.session_state.submit_success_msg = f"✅ 【覆蓋成功】您於 {report_date} 的舊回報已自動刪除，並更新為最新送出的內容！下方表單已自動清空，請勿重複點擊。"
+                    st.session_state.submit_success_msg = f"✅ 【覆蓋成功】您於 {report_date} 的舊回報已自動刪除，並更新為最新送出的內容（送出時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}）！下方表單已自動清空。"
                 else:
-                    st.session_state.submit_success_msg = f"🎉 【送出成功】您於 {report_date} 的工作回報已成功送出！下方表單已自動清空，請勿重複點擊。"
+                    st.session_state.submit_success_msg = f"🎉 【送出成功】您於 {report_date} 的工作回報已成功送出（送出時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}）！下方表單已自動清空。"
                 st.rerun()
 
         st.divider()
@@ -773,7 +786,7 @@ else:
                         adm_name.strip(),
                         adm_email.strip(),
                         adm_role,
-                        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        get_tw_now().strftime("%Y-%m-%d %H:%M:%S")
                     ])
                     clear_all_caches()
                     st.success(f"✅ 已成功建立 **{adm_name}** 的帳號！預設密碼為：`{adm_pass.strip()}`")
@@ -1011,7 +1024,7 @@ else:
                 st.download_button(
                     label="📊 點擊下載【美化分頁版】Excel 報表 (.xlsx)",
                     data=output.getvalue(),
-                    file_name=f"Gold_Report_{safe_period_str}_{datetime.date.today().strftime('%Y%m%d')}.xlsx",
+                    file_name=f"Gold_Report_{safe_period_str}_{get_tw_today().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     type="primary",
                     use_container_width=True
@@ -1060,7 +1073,6 @@ else:
             if detail_df.empty:
                 st.info("🔍 此篩選條件下無符合的回報紀錄。")
             else:
-                # 嚴格依照「回報日期」與「送出時間」由新到舊排序，確保最新日期排在最上方
                 sorted_df = detail_df.sort_values(by=["回報日期", "送出時間"], ascending=[False, False]).reset_index(drop=True)
                 st.caption(f"共找到 **{len(sorted_df)}** 筆符合條件的回報單（已按日期由新到舊排列）：")
                 
@@ -1131,7 +1143,7 @@ else:
                             
                         st.markdown("---")
                         foot_c1, foot_c2 = st.columns([4, 1])
-                        foot_c1.caption(f"系統回報單號：{r_id} ｜ 實際送出時間：{row.get('送出時間', '')}")
+                        foot_c1.caption(f"系統回報單號：{r_id} ｜ 實際送出時間 (台灣時間)：{row.get('送出時間', '')}")
                         if foot_c2.button("🗑️ 刪除此筆回報紀錄", key=f"adm_del_{r_id}"):
                             if delete_report_by_id(ws_reports, ws_compact, ws_comp, r_id):
                                 st.success(f"✅ 已徹底刪除 {row.get('回報日期', '')} - {row.get('姓名', '')} 的回報紀錄！")
