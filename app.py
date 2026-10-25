@@ -61,7 +61,7 @@ def safe_get_df(ws):
     data = []
     for r in all_vals[1:]:
         if not any(str(cell).strip() for cell in r):
-            continue # 跳過完全空白的列
+            continue
         row_padded = r + [""] * max(0, len(headers) - len(r))
         data.append([row_padded[i] for i in valid_cols])
     return pd.DataFrame(data, columns=clean_headers)
@@ -207,27 +207,64 @@ else:
         with col2:
             work_end = st.time_input("🕕 下班時間", datetime.time(18, 0), step=60)
             
-        st.markdown("#### 📦 包貨與寄貨紀錄")
-        c_p1, c_p2, c_p3, c_p4 = st.columns(4)
-        with c_p1:
-            pack_start = st.time_input("包貨開始時間", datetime.time(10, 0), step=60)
-        with c_p2:
-            pack_end = st.time_input("包貨結束時間", datetime.time(12, 0), step=60)
-        with c_p3:
-            pack_count = st.number_input("個人包貨件數", min_value=0, step=1)
-        with c_p4:
-            ship_count = st.number_input("今日寄貨件數", min_value=0, step=1)
+        st.markdown("#### 📦 包貨與寄貨紀錄（有執行才需勾選填寫）")
+        col_chk1, col_chk2 = st.columns(2)
+        
+        pack_start_str = "無"
+        pack_end_str = "無"
+        pack_count = 0
+        pack_duration = 0
+        min_per_pack = 0
+        
+        with col_chk1:
+            has_pack = st.checkbox("📦 今日有包貨")
+            if has_pack:
+                c_p1, c_p2, c_p3 = st.columns(3)
+                with c_p1:
+                    pack_start = st.time_input("包貨開始時間", datetime.time(10, 0), step=60)
+                with c_p2:
+                    pack_end = st.time_input("包貨結束時間", datetime.time(12, 0), step=60)
+                with c_p3:
+                    pack_count = st.number_input("個人包貨件數", min_value=1, value=1, step=1)
+                pack_start_str = pack_start.strftime("%H:%M")
+                pack_end_str = pack_end.strftime("%H:%M")
+                pack_duration = calc_minutes(pack_start, pack_end)
+                min_per_pack = round(pack_duration / pack_count, 2) if pack_count > 0 else 0
+
+        ship_count = 0
+        with col_chk2:
+            has_ship = st.checkbox("🚚 今日有寄貨")
+            if has_ship:
+                ship_count = st.number_input("今日寄貨件數", min_value=1, value=1, step=1)
             
-        st.markdown("#### 💬 客服與直播紀錄")
-        c_l1, c_l2, c_l3, c_l4 = st.columns(4)
-        with c_l1:
-            cs_start = st.time_input("客服回覆開始", datetime.time(9, 0), step=60)
-        with c_l2:
-            cs_end = st.time_input("客服回覆結束", datetime.time(18, 0), step=60)
-        with c_l3:
-            live_start = st.time_input("今日直播開始 (無則免調)", datetime.time(0, 0), step=60)
-        with c_l4:
-            live_end = st.time_input("今日直播結束 (無則免調)", datetime.time(0, 0), step=60)
+        st.markdown("#### 💬 客服與直播紀錄（有執行才需勾選填寫）")
+        col_chk3, col_chk4 = st.columns(2)
+        
+        cs_start_str = "無"
+        cs_end_str = "無"
+        with col_chk3:
+            has_cs = st.checkbox("💬 今日有客服回覆")
+            if has_cs:
+                c_l1, c_l2 = st.columns(2)
+                with c_l1:
+                    cs_start = st.time_input("客服回覆開始", datetime.time(9, 0), step=60)
+                with c_l2:
+                    cs_end = st.time_input("客服回覆結束", datetime.time(18, 0), step=60)
+                cs_start_str = cs_start.strftime("%H:%M")
+                cs_end_str = cs_end.strftime("%H:%M")
+
+        live_start_str = "無"
+        live_end_str = "無"
+        with col_chk4:
+            has_live = st.checkbox("🎥 今日有直播")
+            if has_live:
+                c_l3, c_l4 = st.columns(2)
+                with c_l3:
+                    live_start = st.time_input("今日直播開始", datetime.time(19, 0), step=60)
+                with c_l4:
+                    live_end = st.time_input("今日直播結束", datetime.time(22, 0), step=60)
+                live_start_str = live_start.strftime("%H:%M")
+                live_end_str = live_end.strftime("%H:%M")
 
         st.divider()
         
@@ -295,9 +332,6 @@ else:
             elif not tasks_list:
                 st.error("❌ 請至少填寫一條「今日處理事項」！")
             else:
-                pack_duration = calc_minutes(pack_start, pack_end) if pack_count > 0 else 0
-                min_per_pack = round(pack_duration / pack_count, 2) if pack_count > 0 else 0
-                
                 report_id = datetime.datetime.now().strftime("%Y%m%d%H%M%S") + "_" + user["username"]
                 ws_reports.append_row([
                     report_id,
@@ -307,16 +341,16 @@ else:
                     user["name"],
                     work_start.strftime("%H:%M"),
                     work_end.strftime("%H:%M"),
-                    pack_start.strftime("%H:%M"),
-                    pack_end.strftime("%H:%M"),
+                    pack_start_str,
+                    pack_end_str,
                     pack_count,
                     pack_duration,
                     min_per_pack,
-                    cs_start.strftime("%H:%M"),
-                    cs_end.strftime("%H:%M"),
+                    cs_start_str,
+                    cs_end_str,
                     ship_count,
-                    live_start.strftime("%H:%M"),
-                    live_end.strftime("%H:%M"),
+                    live_start_str,
+                    live_end_str,
                     has_complaint,
                     c_who, c_where, c_when, c_what, c_why, c_how,
                     "是" if has_8d else "否",
