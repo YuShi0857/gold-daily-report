@@ -36,7 +36,7 @@ def get_worksheets():
     if not ws_users.row_values(1):
         ws_users.append_row(["username", "password_hash", "name", "email", "role", "created_at"])
         admin_pass = hashlib.sha256("admin888".encode()).hexdigest()
-        ws_users.append_row(["admin", admin_pass, "系統管理員", st.secrets["smtp"]["sender_email"], "admin", str(datetime.datetime.now())])
+        ws_users.append_row(["admin", admin_pass, "系統管理員", st.secrets["smtp"]["sender_email"], "admin", str(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))])
         
     if not ws_reports.row_values(1):
         ws_reports.append_row([
@@ -65,6 +65,14 @@ def safe_get_df(ws):
         row_padded = r + [""] * max(0, len(headers) - len(r))
         data.append([row_padded[i] for i in valid_cols])
     return pd.DataFrame(data, columns=clean_headers)
+
+# 根據帳號名稱精準尋找在 Google Sheet 中的第幾列（避免刪除或空白列造成錯位）
+def find_user_row_idx(ws_users, target_username):
+    col_vals = ws_users.col_values(1) # 第一欄為 username
+    for idx, val in enumerate(col_vals):
+        if idx > 0 and val.strip() == str(target_username).strip():
+            return idx + 1 # gspread 列數從 1 開始
+    return None
 
 # ================= 2. 輔助與安全函數 =================
 def hash_password(password):
@@ -153,7 +161,7 @@ if not st.session_state.logged_in:
                     st.error("❌ 此帳號已被註冊，請換一個！")
                 else:
                     ws_users.append_row([
-                        reg_user, hash_password(reg_pass1), reg_name, reg_email, "staff", str(datetime.datetime.now())
+                        reg_user.strip(), hash_password(reg_pass1), reg_name.strip(), reg_email.strip(), "staff", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     ])
                     st.success("✅ 註冊成功！請切換至「登入系統」分頁進行登入。")
 
@@ -167,10 +175,11 @@ if not st.session_state.logged_in:
                 match = users_df[(users_df["username"] == fp_user) & (users_df["email"] == fp_email)]
                 if not match.empty:
                     new_temp_pass = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-                    row_idx = int(match.index[0]) + 2
-                    ws_users.update_cell(row_idx, 2, hash_password(new_temp_pass))
-                    if send_reset_email(fp_email, new_temp_pass):
-                        st.success("✅ 臨時新密碼已寄出！請至信箱收信並重新登入。")
+                    row_idx = find_user_row_idx(ws_users, fp_user)
+                    if row_idx:
+                        ws_users.update_cell(row_idx, 2, hash_password(new_temp_pass))
+                        if send_reset_email(fp_email, new_temp_pass):
+                            st.success("✅ 臨時新密碼已寄出！請至信箱收信並重新登入。")
                 else:
                     st.error("❌ 帳號與綁定信箱不符合！")
             else:
@@ -184,7 +193,7 @@ else:
     
     menu_options = ["📝 每日工作回報", "🔒 修改密碼"]
     if user["role"] == "admin":
-        menu_options.insert(0, "📊 主管後台數據中心")
+        menu_options = ["📊 主管後台數據中心", "👥 帳號與權限管理", "📝 每日工作回報", "🔒 修改密碼"]
         
     choice = st.sidebar.radio("功能選單", menu_options)
     
@@ -375,14 +384,125 @@ else:
             elif hash_password(old_p) != user["password_hash"]:
                 st.error("❌ 舊密碼輸入錯誤！")
             else:
-                users_df = safe_get_df(ws_users)
-                row_idx = int(users_df[users_df["username"] == user["username"]].index[0]) + 2
-                new_hash = hash_password(new_p1)
-                ws_users.update_cell(row_idx, 2, new_hash)
-                st.session_state.user_info["password_hash"] = new_hash
-                st.success("✅ 密碼更新成功！")
+                row_idx = find_user_row_idx(ws_users, user["username"])
+                if row_idx:
+                    new_hash = hash_password(new_p1)
+                    ws_users.update_cell(row_idx, 2, new_hash)
+                    st.session_state.user_info["password_hash"] = new_hash
+                    st.success("✅ 密碼更新成功！")
 
-    # ---------------- 功能 C：主管後台數據中心 ----------------
+    # ---------------- 功能 C：帳號與權限管理 (管理員專屬) ----------------
+    elif choice == "👥 帳號與權限管理" and user["role"] == "admin":
+        st.title("👥 部門帳號與權限管理中心")
+        users_df = safe_get_df(ws_users)
+        
+        st.subheader("📋 目前已註冊帳號總覽")
+        if not users_df.empty:
+            display_users = users_df[["username", "name", "email", "role", "created_at"]].copy()
+            display_users["role_label"] = display_users["role"].apply(lambda r: "👑 管理員 (admin)" if r == "admin" else "👤 一般同仁 (staff)")
+            display_users = display_users[["username", "name", "email", "role_label", "created_at"]].rename(columns={
+                "username": "登入帳號",
+                "name": "真實姓名",
+                "email": "綁定信箱",
+                "role_label": "目前權限",
+                "created_at": "建立時間"
+            })
+            st.dataframe(display_users, use_container_width=True)
+        else:
+            st.info("目前尚無帳號資料。")
+
+        st.divider()
+        col_m1, col_m2 = st.columns(2)
+        
+        # 左欄：修改權限、強制改密碼、刪除帳號
+        with col_m1:
+            st.subheader("🛡️ 調整現有帳號權限 / 重設密碼")
+            if not users_df.empty:
+                user_options = [f"{r['name']} (帳號: {r['username']} | 權限: {r['role']})" for _, r in users_df.iterrows()]
+                selected_opt = st.selectbox("請選擇要操作的帳號", user_options)
+                target_idx = user_options.index(selected_opt)
+                target_row = users_df.iloc[target_idx]
+                target_uname = target_row["username"]
+                
+                # 1. 權限調整
+                st.markdown("##### 1️⃣ 變更系統權限")
+                new_role = st.radio(
+                    "選擇賦予該帳號的權限等級：",
+                    ["staff", "admin"],
+                    index=0 if target_row["role"] == "staff" else 1,
+                    format_func=lambda x: "👤 一般同仁 (僅可填寫每日回報)" if x == "staff" else "👑 管理員 (可查看數據後台 & 管理所有帳號)",
+                    horizontal=True
+                )
+                if st.button("💾 儲存權限變更", type="primary"):
+                    if target_uname == "admin" and new_role != "admin":
+                        st.error("❌ 系統保護機制：預設最高管理員 `admin` 不可降級為一般同仁！")
+                    else:
+                        sheet_row = find_user_row_idx(ws_users, target_uname)
+                        if sheet_row:
+                            ws_users.update_cell(sheet_row, 5, new_role)
+                            if target_uname == user["username"]:
+                                st.session_state.user_info["role"] = new_role
+                            st.success(f"✅ 已將 **{target_row['name']}** 的權限更新為：`{new_role}`！")
+                            st.rerun()
+                            
+                st.markdown("---")
+                # 2. 管理員手動重設該員工密碼
+                st.markdown("##### 2️⃣ 強制設定新密碼 (免信箱驗證)")
+                force_pass = st.text_input("輸入要幫該同仁設定的新密碼", placeholder="例如：gold8888", key="f_pass")
+                if st.button("🔑 直接更新該帳號密碼"):
+                    if not force_pass.strip():
+                        st.warning("⚠️ 請先輸入新密碼！")
+                    else:
+                        sheet_row = find_user_row_idx(ws_users, target_uname)
+                        if sheet_row:
+                            ws_users.update_cell(sheet_row, 2, hash_password(force_pass.strip()))
+                            st.success(f"✅ 已成功將 **{target_row['name']}** 的密碼重設為：`{force_pass.strip()}`")
+
+                st.markdown("---")
+                # 3. 刪除帳號
+                st.markdown("##### 3️⃣ 移除離職或誤建帳號")
+                confirm_del = st.checkbox(f"我確認要永久刪除「{target_row['name']} ({target_uname})」的帳號")
+                if st.button("🗑️ 刪除此帳號", disabled=not confirm_del):
+                    if target_uname in ["admin", user["username"]]:
+                        st.error("❌ 無法刪除最高管理員 `admin` 或您目前正在登入中的帳號！")
+                    else:
+                        sheet_row = find_user_row_idx(ws_users, target_uname)
+                        if sheet_row:
+                            ws_users.delete_rows(sheet_row)
+                            st.success(f"✅ 已刪除帳號：{target_row['name']} ({target_uname})")
+                            st.rerun()
+
+        # 右欄：管理員直接新增帳號（設定預設密碼）
+        with col_m2:
+            st.subheader("➕ 由後台直接幫同仁建立帳號")
+            st.caption("您可以先幫同仁建好帳號與預設密碼，同仁登入後可自行修改密碼。")
+            adm_name = st.text_input("同仁真實姓名 (將綁定回報單)", key="a_name")
+            adm_email = st.text_input("同仁常用信箱 (供未來忘記密碼收信用)", key="a_email")
+            adm_user = st.text_input("設定登入帳號", key="a_user")
+            adm_pass = st.text_input("設定預設密碼", value="gold8888", key="a_pass")
+            adm_role = st.selectbox(
+                "初始權限設定",
+                ["staff", "admin"],
+                format_func=lambda x: "👤 一般同仁 (staff)" if x == "staff" else "👑 管理員 (admin)"
+            )
+            if st.button("➕ 立即建立帳號", type="primary"):
+                if not all([adm_name.strip(), adm_email.strip(), adm_user.strip(), adm_pass.strip()]):
+                    st.warning("⚠️ 請填寫所有欄位！")
+                elif not users_df.empty and adm_user.strip() in users_df["username"].values:
+                    st.error("❌ 此登入帳號已經存在，請換一個名稱！")
+                else:
+                    ws_users.append_row([
+                        adm_user.strip(),
+                        hash_password(adm_pass.strip()),
+                        adm_name.strip(),
+                        adm_email.strip(),
+                        adm_role,
+                        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    ])
+                    st.success(f"✅ 已成功建立 **{adm_name}** 的帳號！預設密碼為：`{adm_pass.strip()}`")
+                    st.rerun()
+
+    # ---------------- 功能 D：主管後台數據中心 ----------------
     elif choice == "📊 主管後台數據中心" and user["role"] == "admin":
         st.title("📊 黃金部門 - 主管後台數據中心")
         
@@ -390,7 +510,6 @@ else:
         if df.empty:
             st.info("目前尚無任何同仁提交回報資料。您可以先點選左側「📝 每日工作回報」測試送出一筆！")
         else:
-            # 確保數值欄位轉為數字型態，方便統計加總
             for col in ["pack_count", "pack_duration_min", "min_per_pack", "ship_count"]:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
