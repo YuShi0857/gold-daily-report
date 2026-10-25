@@ -32,16 +32,16 @@ REPORT_HEADERS = [
 COMPACT_HEADERS = [
     "回報日期", "姓名", "上下班時段", "包貨紀錄(時段/件數/單件耗時)", 
     "寄貨件數", "客服紀錄(時段/時數)", "直播紀錄(時段/時數)", 
-    "今日處理事項", "提案改善", "對同仁想法", "有無客訴"
+    "今日處理事項明細", "提案改善", "對同仁想法", "有無客訴", "回報單號"
 ]
 
 COMPLAINT_HEADERS = [
     "回報日期", "填表同仁", "1.客人(Who)", "2.管道(Where)", 
     "3.訂單與客訴日(When)", "4.問題詳情(What)", "5.原因分析(Why)", 
-    "6.解決與改善(How)", "有無附8D報告", "8D檔案名稱"
+    "6.解決與改善(How)", "有無附8D報告", "8D檔案名稱", "回報單號"
 ]
 
-# ================= 1. 資料庫連線與自動中文化升級 =================
+# ================= 1. 資料庫連線、自動排版美化與同步 =================
 @st.cache_resource
 def init_connection():
     scopes = [
@@ -52,14 +52,90 @@ def init_connection():
         st.secrets["gcp_service_account"], scopes=scopes
     )
     client = gspread.authorize(creds)
-    return client.open("黃金部門工作回報系統")
+    # 若您有將私人副本改名，可在此處修改名稱，預設為「黃金部門工作回報系統」
+    sheet_name = st.secrets.get("sheet_name", "黃金部門工作回報系統")
+    return client.open(sheet_name)
+
+def beautify_google_sheet(ws, num_cols):
+    """自動幫線上 Google 試算表上深藍底色、白字粗體、凍結首列、自動換行"""
+    try:
+        ws.freeze(rows=1)
+        end_col = chr(64 + min(num_cols, 26))
+        ws.format(f"A1:{end_col}1", {
+            "backgroundColor": {"red": 0.12, "green": 0.31, "blue": 0.47},
+            "textFormat": {"foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}, "bold": True, "fontSize": 11},
+            "horizontalAlignment": "CENTER",
+            "verticalAlignment": "MIDDLE"
+        })
+        ws.format(f"A2:{end_col}500", {
+            "wrapStrategy": "WRAP",
+            "verticalAlignment": "TOP"
+        })
+    except:
+        pass
+
+def sync_pretty_sheets(ws_reports, ws_compact, ws_comp):
+    """將主資料庫完整同步至『每日作業總覽』與『客訴與異常紀錄』，確保刪除或重送覆蓋後100%一致"""
+    df = safe_get_df(ws_reports)
+    compact_rows = [COMPACT_HEADERS]
+    comp_rows = [COMPLAINT_HEADERS]
+    
+    if not df.empty:
+        # 依日期由新到舊排列在 Google 試算表最上方，方便老闆打開直接看最新資料
+        df_sorted = df.iloc[::-1]
+        for _, r in df_sorted.iterrows():
+            p_cnt = pd.to_numeric(r.get("包貨件數", 0), errors="coerce") or 0
+            cs_min = pd.to_numeric(r.get("客服總分鐘", 0), errors="coerce") or 0
+            lv_min = pd.to_numeric(r.get("直播總分鐘", 0), errors="coerce") or 0
+            
+            pack_str = f"{r.get('包貨開始','無')}~{r.get('包貨結束','無')}\n({int(p_cnt)}件 / {r.get('單件包貨耗時(分)',0)}分)" if p_cnt > 0 else "無"
+            cs_str = f"{r.get('客服開始','無')}~{r.get('客服結束','無')}\n({round(cs_min/60, 1)}小時)" if cs_min > 0 else "無"
+            lv_str = f"{r.get('直播開始','無')}~{r.get('直播結束','無')}\n({round(lv_min/60, 1)}小時)" if lv_min > 0 else "無"
+            
+            compact_rows.append([
+                str(r.get("回報日期", "")),
+                str(r.get("姓名", "")),
+                f"{r.get('上班時間', '')} ~ {r.get('下班時間', '')}",
+                pack_str,
+                str(r.get("寄貨件數", 0)),
+                cs_str,
+                lv_str,
+                str(r.get("今日處理事項", "")),
+                str(r.get("提案改善", "")) or "無",
+                str(r.get("對同仁想法", "")) or "無",
+                str(r.get("有無客訴", "無")),
+                str(r.get("回報單號", ""))
+            ])
+            
+            if r.get("有無客訴") == "有" or r.get("有無8D") == "是":
+                comp_rows.append([
+                    str(r.get("回報日期", "")),
+                    str(r.get("姓名", "")),
+                    str(r.get("客訴_Who", "")),
+                    str(r.get("客訴_Where", "")),
+                    str(r.get("客訴_When", "")),
+                    str(r.get("客訴_What", "")),
+                    str(r.get("客訴_Why", "")),
+                    str(r.get("客訴_How", "")),
+                    str(r.get("有無8D", "否")),
+                    str(r.get("8D檔名", "")),
+                    str(r.get("回報單號", ""))
+                ])
+                
+    ws_compact.clear()
+    ws_compact.update(compact_rows)
+    beautify_google_sheet(ws_compact, len(COMPACT_HEADERS))
+    
+    ws_comp.clear()
+    ws_comp.update(comp_rows)
+    beautify_google_sheet(ws_comp, len(COMPLAINT_HEADERS))
 
 def get_worksheets():
     sh = init_connection()
     ws_users = sh.worksheet("users")
     ws_reports = sh.worksheet("reports")
     
-    # 1. 初始化 users 分頁 (全中文標題)
+    # 1. 初始化 users 分頁
     u_headers = ws_users.row_values(1)
     if not u_headers:
         ws_users.append_row(["登入帳號", "密碼雜湊", "真實姓名", "綁定信箱", "系統權限", "建立時間"])
@@ -68,12 +144,11 @@ def get_worksheets():
     elif u_headers[0] == "username":
         ws_users.update("A1:F1", [["登入帳號", "密碼雜湊", "真實姓名", "綁定信箱", "系統權限", "建立時間"]])
 
-    # 2. 初始化或升級 reports 主資料庫分頁 (全中文標題 + 擴充客服/直播分鐘數)
+    # 2. 初始化或升級 reports 主資料庫分頁
     r_vals = ws_reports.get_all_values()
     if not r_vals:
         ws_reports.append_row(REPORT_HEADERS)
     elif r_vals[0][0] == "report_id" or len(r_vals[0]) < len(REPORT_HEADERS):
-        # 自動將舊版英文表格無痛升級為新版中文結構
         new_rows = [REPORT_HEADERS]
         for r in r_vals[1:]:
             if not any(str(c).strip() for c in r):
@@ -89,19 +164,29 @@ def get_worksheets():
         ws_reports.clear()
         ws_reports.update(new_rows)
 
-    # 3. 自動建立「每日作業總覽」與「客訴與異常紀錄」兩個精簡中文分頁（解決試算表太長要一直往右滑的問題）
+    # 3. 建立並美化「📊 每日作業總覽」與「🚨 客訴與異常紀錄」分頁，並隱藏冗長的底層資料表
     existing_titles = [w.title for w in sh.worksheets()]
-    if "每日作業總覽" not in existing_titles:
-        ws_compact = sh.add_worksheet(title="每日作業總覽", rows="1000", cols="12")
-        ws_compact.append_row(COMPACT_HEADERS)
+    need_init_sync = False
+    if "📊 每日作業總覽" not in existing_titles:
+        ws_compact = sh.add_worksheet(title="📊 每日作業總覽", rows="1000", cols="14")
+        need_init_sync = True
     else:
-        ws_compact = sh.worksheet("每日作業總覽")
+        ws_compact = sh.worksheet("📊 每日作業總覽")
         
-    if "客訴與異常紀錄" not in existing_titles:
-        ws_comp = sh.add_worksheet(title="客訴與異常紀錄", rows="500", cols="11")
-        ws_comp.append_row(COMPLAINT_HEADERS)
+    if "🚨 客訴與異常紀錄" not in existing_titles:
+        ws_comp = sh.add_worksheet(title="🚨 客訴與異常紀錄", rows="500", cols="12")
+        need_init_sync = True
     else:
-        ws_comp = sh.worksheet("客訴與異常紀錄")
+        ws_comp = sh.worksheet("🚨 客訴與異常紀錄")
+
+    if need_init_sync:
+        sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
+        try:
+            # 自動將冗長的底層表隱藏，讓老闆打開 Google Sheet 只看到最漂亮精簡的中文總覽表
+            ws_reports.hide()
+            ws_users.hide()
+        except:
+            pass
 
     return ws_users, ws_reports, ws_compact, ws_comp
 
@@ -118,7 +203,7 @@ def calc_minutes(t_start, t_end):
 
 def calc_minutes_str(s1, s2):
     try:
-        if not s1 or not s2 or s1 == "無" or s2 == "無" or s1 == "00:00" and s2 == "00:00":
+        if not s1 or not s2 or s1 == "無" or s2 == "無" or (s1 == "00:00" and s2 == "00:00"):
             return 0
         t1 = datetime.datetime.strptime(s1.strip(), "%H:%M").time()
         t2 = datetime.datetime.strptime(s2.strip(), "%H:%M").time()
@@ -152,6 +237,29 @@ def find_user_row_idx(ws_users, target_username):
             return idx + 1
     return None
 
+def delete_report_by_id(ws_reports, ws_compact, ws_comp, target_report_id):
+    """根據回報單號精準刪除回報，並同步更新精簡分頁"""
+    col_vals = ws_reports.col_values(1)
+    deleted = False
+    for idx in range(len(col_vals) - 1, 0, -1):
+        if str(col_vals[idx]).strip() == str(target_report_id).strip():
+            ws_reports.delete_rows(idx + 1)
+            deleted = True
+    if deleted:
+        sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
+    return deleted
+
+def delete_existing_same_day_report(ws_reports, username, report_date_str):
+    """若同一人、同一天已有舊回報，自動刪除舊筆以供新筆覆蓋，回傳是否有覆蓋舊資料"""
+    all_vals = ws_reports.get_all_values()
+    overwritten = False
+    for idx in range(len(all_vals) - 1, 0, -1):
+        r = all_vals[idx]
+        if len(r) >= 4 and str(r[2]).strip() == str(report_date_str).strip() and str(r[3]).strip() == str(username).strip():
+            ws_reports.delete_rows(idx + 1)
+            overwritten = True
+    return overwritten
+
 def get_quarter_label(date_str):
     try:
         dt = pd.to_datetime(date_str)
@@ -161,7 +269,6 @@ def get_quarter_label(date_str):
         return "未知季度"
 
 def style_excel_File(writer):
-    # 美化匯出的 Excel：加上深藍底白字標題、自動欄寬、文字自動換行，不用一直往右滑
     header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
     header_font = Font(color="FFFFFF", bold=True, size=11)
     for sheet_name in writer.sheets:
@@ -211,6 +318,10 @@ if "logged_in" not in st.session_state:
     st.session_state.user_info = {}
 if "task_rows" not in st.session_state:
     st.session_state.task_rows = 1
+if "form_ver" not in st.session_state:
+    st.session_state.form_ver = 0
+if "submit_success_msg" not in st.session_state:
+    st.session_state.submit_success_msg = ""
 
 try:
     ws_users, ws_reports, ws_compact, ws_comp = get_worksheets()
@@ -309,16 +420,33 @@ else:
     # ---------------- 功能 A：每日工作回報 ----------------
     if choice == "📝 每日工作回報":
         st.title("📝 黃金部門 - 每日工作回報單")
-        st.info(f"📌 填表人：**{user['name']}** （系統已自動綁定您的姓名）")
         
-        report_date = st.date_input("📅 回報歸屬日期", datetime.date.today())
+        # 若剛送出成功，顯示超醒目成功橫幅，並清空下方所有格子防止重複按送出
+        if st.session_state.submit_success_msg:
+            st.balloons()
+            st.success(st.session_state.submit_success_msg)
+            st.session_state.submit_success_msg = ""
+
+        st.info(f"📌 填表人：**{user['name']}** ｜ 💡 **防呆提示**：若您發現今天送出的內容有誤，只要選同一個日期**直接重新填寫並送出**，系統就會自動幫您刪除舊的那筆、覆蓋為最新內容！")
+        
+        fv = st.session_state.form_ver
+        report_date = st.date_input("📅 回報歸屬日期", datetime.date.today(), key=f"rdate_{fv}")
+        
+        # 即時檢查該同仁在選定的日期是否已經送出過
+        df_check = safe_get_df(ws_reports)
+        already_submitted = False
+        if not df_check.empty:
+            dup_check = df_check[(df_check["帳號"] == user["username"]) & (df_check["回報日期"] == str(report_date))]
+            if not dup_check.empty:
+                already_submitted = True
+                st.warning(f"⚠️ 系統偵測到您在 **{report_date}** 已經提交過回報！若您現在再次送出，將會**自動覆蓋並刪除**當天舊的那筆紀錄。")
         
         st.markdown("### 一、 基礎出勤與作業數據")
         col1, col2 = st.columns(2)
         with col1:
-            work_start = st.time_input("🕒 上班時間", datetime.time(9, 0), step=60)
+            work_start = st.time_input("🕒 上班時間", datetime.time(9, 0), step=60, key=f"ws_{fv}")
         with col2:
-            work_end = st.time_input("🕕 下班時間", datetime.time(18, 0), step=60)
+            work_end = st.time_input("🕕 下班時間", datetime.time(18, 0), step=60, key=f"we_{fv}")
             
         st.markdown("#### 📦 包貨與寄貨紀錄（有執行才需勾選填寫）")
         col_chk1, col_chk2 = st.columns(2)
@@ -327,15 +455,15 @@ else:
         pack_count, pack_duration, min_per_pack = 0, 0, 0
         
         with col_chk1:
-            has_pack = st.checkbox("📦 今日有包貨")
+            has_pack = st.checkbox("📦 今日有包貨", key=f"hp_{fv}")
             if has_pack:
                 c_p1, c_p2, c_p3 = st.columns(3)
                 with c_p1:
-                    pack_start = st.time_input("包貨開始時間", datetime.time(10, 0), step=60)
+                    pack_start = st.time_input("包貨開始時間", datetime.time(10, 0), step=60, key=f"ps_{fv}")
                 with c_p2:
-                    pack_end = st.time_input("包貨結束時間", datetime.time(12, 0), step=60)
+                    pack_end = st.time_input("包貨結束時間", datetime.time(12, 0), step=60, key=f"pe_{fv}")
                 with c_p3:
-                    pack_count = st.number_input("個人包貨件數", min_value=1, value=1, step=1)
+                    pack_count = st.number_input("個人包貨件數", min_value=1, value=1, step=1, key=f"pc_{fv}")
                 pack_start_str = pack_start.strftime("%H:%M")
                 pack_end_str = pack_end.strftime("%H:%M")
                 pack_duration = calc_minutes(pack_start, pack_end)
@@ -343,9 +471,9 @@ else:
 
         ship_count = 0
         with col_chk2:
-            has_ship = st.checkbox("🚚 今日有寄貨")
+            has_ship = st.checkbox("🚚 今日有寄貨", key=f"hs_{fv}")
             if has_ship:
-                ship_count = st.number_input("今日寄貨件數", min_value=1, value=1, step=1)
+                ship_count = st.number_input("今日寄貨件數", min_value=1, value=1, step=1, key=f"sc_{fv}")
             
         st.markdown("#### 💬 客服與直播紀錄（有執行才需勾選填寫）")
         col_chk3, col_chk4 = st.columns(2)
@@ -353,13 +481,13 @@ else:
         cs_start_str, cs_end_str = "無", "無"
         cs_duration = 0
         with col_chk3:
-            has_cs = st.checkbox("💬 今日有客服回覆")
+            has_cs = st.checkbox("💬 今日有客服回覆", key=f"hcs_{fv}")
             if has_cs:
                 c_l1, c_l2 = st.columns(2)
                 with c_l1:
-                    cs_start = st.time_input("客服回覆開始", datetime.time(9, 0), step=60)
+                    cs_start = st.time_input("客服回覆開始", datetime.time(9, 0), step=60, key=f"css_{fv}")
                 with c_l2:
-                    cs_end = st.time_input("客服回覆結束", datetime.time(18, 0), step=60)
+                    cs_end = st.time_input("客服回覆結束", datetime.time(18, 0), step=60, key=f"cse_{fv}")
                 cs_start_str = cs_start.strftime("%H:%M")
                 cs_end_str = cs_end.strftime("%H:%M")
                 cs_duration = calc_minutes(cs_start, cs_end)
@@ -367,13 +495,13 @@ else:
         live_start_str, live_end_str = "無", "無"
         live_duration = 0
         with col_chk4:
-            has_live = st.checkbox("🎥 今日有直播")
+            has_live = st.checkbox("🎥 今日有直播", key=f"hlv_{fv}")
             if has_live:
                 c_l3, c_l4 = st.columns(2)
                 with c_l3:
-                    live_start = st.time_input("今日直播開始", datetime.time(19, 0), step=60)
+                    live_start = st.time_input("今日直播開始", datetime.time(19, 0), step=60, key=f"lvs_{fv}")
                 with c_l4:
-                    live_end = st.time_input("今日直播結束", datetime.time(22, 0), step=60)
+                    live_end = st.time_input("今日直播結束", datetime.time(22, 0), step=60, key=f"lve_{fv}")
                 live_start_str = live_start.strftime("%H:%M")
                 live_end_str = live_end.strftime("%H:%M")
                 live_duration = calc_minutes(live_start, live_end)
@@ -382,22 +510,22 @@ else:
         
         # 動態展開：客訴與 8D
         st.markdown("### 二、 客訴與重大異常回報")
-        has_complaint = st.radio("🚨 今日是否有任何客訴？", ["無", "有"], horizontal=True)
+        has_complaint = st.radio("🚨 今日是否有任何客訴？", ["無", "有"], horizontal=True, key=f"hc_{fv}")
         c_who = c_where = c_when = c_what = c_why = c_how = ""
         
         if has_complaint == "有":
             st.warning("⚠️ 請詳細填寫以下客訴 5W1H 資訊：")
-            c_who = st.text_input("1. 【Who】客人本名 + TK名 / 帳號名稱")
-            c_where = st.selectbox("2. 【Where】客訴發生管道", ["直播上", "LINE客服上", "LINE社群", "其他"])
-            c_when = st.text_input("3. 【When】幾月幾號的訂單 及 客訴發生日期")
-            c_what = st.text_area("4. 【What】發生什麼事 / 商品的問題 (請詳細打字說明)")
-            c_why = st.text_area("5. 【Why】客訴背後原因分析")
-            c_how = st.text_area("6. 【How】執行方法 / 解決方案 / 未來如何改善")
+            c_who = st.text_input("1. 【Who】客人本名 + TK名 / 帳號名稱", key=f"cwho_{fv}")
+            c_where = st.selectbox("2. 【Where】客訴發生管道", ["直播上", "LINE客服上", "LINE社群", "其他"], key=f"cwhere_{fv}")
+            c_when = st.text_input("3. 【When】幾月幾號的訂單 及 客訴發生日期", key=f"cwhen_{fv}")
+            c_what = st.text_area("4. 【What】發生什麼事 / 商品的問題 (請詳細打字說明)", key=f"cwhat_{fv}")
+            c_why = st.text_area("5. 【Why】客訴背後原因分析", key=f"cwhy_{fv}")
+            c_how = st.text_area("6. 【How】執行方法 / 解決方案 / 未來如何改善", key=f"chow_{fv}")
 
-        has_8d = st.checkbox("📄 若有重大異常，需填寫並附上 8D 報告檔案")
+        has_8d = st.checkbox("📄 若有重大異常，需填寫並附上 8D 報告檔案", key=f"h8d_{fv}")
         file_8d_name, file_8d_b64 = "", ""
         if has_8d:
-            uploaded_8d = st.file_uploader("請上傳填妥之 8D 檔案 (支援 Excel, Word, PDF，建議小於 1MB)", type=["xlsx", "xls", "docx", "doc", "pdf"])
+            uploaded_8d = st.file_uploader("請上傳填妥之 8D 檔案 (支援 Excel, Word, PDF，建議小於 1MB)", type=["xlsx", "xls", "docx", "doc", "pdf"], key=f"u8d_{fv}")
             if uploaded_8d is not None:
                 file_8d_name = uploaded_8d.name
                 file_8d_b64 = base64.b64encode(uploaded_8d.read()).decode("utf-8")
@@ -420,11 +548,11 @@ else:
         for i in range(st.session_state.task_rows):
             t_col1, t_col2, t_col3 = st.columns([1.5, 1.5, 5])
             with t_col1:
-                ts = st.time_input(f"開始時間 #{i+1}", datetime.time(9, 0), key=f"ts_{i}", step=60)
+                ts = st.time_input(f"開始時間 #{i+1}", datetime.time(9, 0), key=f"ts_{fv}_{i}", step=60)
             with t_col2:
-                te = st.time_input(f"結束時間 #{i+1}", datetime.time(10, 0), key=f"te_{i}", step=60)
+                te = st.time_input(f"結束時間 #{i+1}", datetime.time(10, 0), key=f"te_{fv}_{i}", step=60)
             with t_col3:
-                td = st.text_input(f"處理事項內容 #{i+1}", placeholder="請輸入該時段具體完成的事項...", key=f"td_{i}")
+                td = st.text_input(f"處理事項內容 #{i+1}", placeholder="請輸入該時段具體完成的事項...", key=f"td_{fv}_{i}")
             if td.strip():
                 tasks_list.append(f"【{ts.strftime('%H:%M')} - {te.strftime('%H:%M')}】{td.strip()}")
 
@@ -432,10 +560,11 @@ else:
 
         # 提案與回饋
         st.markdown("### 四、 提案改善與同仁想法回饋")
-        improvement_proposal = st.text_area("💡 提案改善欄位 (針對作業流程、商品、工具有任何優化建議皆可提出)")
-        peer_feedback = st.text_area("🤝 針對其他同仁有任何想法或建議 (僅主管後台可見)")
+        improvement_proposal = st.text_area("💡 提案改善欄位 (針對作業流程、商品、工具有任何優化建議皆可提出)", key=f"imp_{fv}")
+        peer_feedback = st.text_area("🤝 針對其他同仁有任何想法或建議 (僅主管後台可見)", key=f"peer_{fv}")
 
-        if st.button("🚀 確認無誤，送出今日回報", type="primary", use_container_width=True):
+        btn_label = "🔄 確認無誤，覆蓋更新今日回報" if already_submitted else "🚀 確認無誤，送出今日回報"
+        if st.button(btn_label, type="primary", use_container_width=True):
             if has_complaint == "有" and not all([c_who, c_when, c_what, c_why, c_how]):
                 st.error("❌ 您勾選了「有客訴」，請將 Who / When / What / Why / How 所有欄位填寫完整！")
             elif has_8d and not file_8d_name:
@@ -443,8 +572,10 @@ else:
             elif not tasks_list:
                 st.error("❌ 請至少填寫一條「今日處理事項」！")
             else:
+                # 若同一天已有該員工舊資料，先自動刪除舊資料
+                was_overwritten = delete_existing_same_day_report(ws_reports, user["username"], str(report_date))
+                
                 report_id = datetime.datetime.now().strftime("%Y%m%d%H%M%S") + "_" + user["username"]
-                # 1. 寫入主資料庫 (全中文標題)
                 ws_reports.append_row([
                     report_id,
                     datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -475,33 +606,35 @@ else:
                     peer_feedback
                 ])
                 
-                # 2. 同步寫入「每日作業總覽」精簡分頁（讓你在 Google Sheet 直接看超清爽，不用往右滑！）
-                pack_summary = f"{pack_start_str}~{pack_end_str} ({pack_count}件 / {min_per_pack}分)" if pack_count > 0 else "無"
-                cs_summary = f"{cs_start_str}~{cs_end_str} ({round(cs_duration/60, 1)}小時)" if cs_duration > 0 else "無"
-                live_summary = f"{live_start_str}~{live_end_str} ({round(live_duration/60, 1)}小時)" if live_duration > 0 else "無"
-                ws_compact.append_row([
-                    str(report_date),
-                    user["name"],
-                    f"{work_start.strftime('%H:%M')}~{work_end.strftime('%H:%M')}",
-                    pack_summary,
-                    ship_count,
-                    cs_summary,
-                    live_summary,
-                    "\n".join(tasks_list),
-                    improvement_proposal or "無",
-                    peer_feedback or "無",
-                    has_complaint
-                ])
+                # 同步刷新精簡漂亮的 Google 試算表分頁
+                sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
                 
-                # 3. 若有客訴或 8D，同步寫入「客訴與異常紀錄」專屬分頁
-                if has_complaint == "有" or has_8d:
-                    ws_comp.append_row([
-                        str(report_date), user["name"], c_who, c_where, c_when, c_what, c_why, c_how,
-                        "是" if has_8d else "否", file_8d_name
-                    ])
-                    
-                st.success("🎉 今日工作回報已成功送出！辛苦了！")
+                # 清空表單狀態並跳出成功訊息
                 st.session_state.task_rows = 1
+                st.session_state.form_ver += 1
+                if was_overwritten:
+                    st.session_state.submit_success_msg = f"✅ 【覆蓋成功】您於 {report_date} 的舊回報已自動刪除，並更新為最新送出的內容！下方表單已自動清空，請勿重複點擊。"
+                else:
+                    st.session_state.submit_success_msg = f"🎉 【送出成功】您於 {report_date} 的工作回報已成功送出！下方表單已自動清空，請勿重複點擊。"
+                st.rerun()
+
+        # 讓同仁也能檢視自己近期送出的紀錄或自行撤回誤送的日期
+        st.divider()
+        with st.expander("🗂️ 檢視 / 撤回我近期已送出的回報紀錄"):
+            if not df_check.empty:
+                my_df = df_check[df_check["帳號"] == user["username"]].iloc[::-1].head(10)
+                if not my_df.empty:
+                    for _, mrow in my_df.iterrows():
+                        mc1, mc2 = st.columns([5, 1])
+                        mc1.markdown(f"**📅 日期：{mrow['回報日期']}** ｜ 送出時間：`{mrow['送出時間']}` ｜ 包貨：{mrow['包貨件數']}件 / 寄貨：{mrow['寄貨件數']}件 ｜ 事項：{str(mrow['今日處理事項'])[:30]}...")
+                        if mc2.button("🗑️ 撤回刪除", key=f"self_del_{mrow['回報單號']}"):
+                            delete_report_by_id(ws_reports, ws_compact, ws_comp, mrow["回報單號"])
+                            st.success(f"✅ 已成功刪除您於 {mrow['回報日期']} 的回報紀錄！")
+                            st.rerun()
+                else:
+                    st.caption("您目前尚無任何已送出的回報紀錄。")
+            else:
+                st.caption("目前尚無任何已送出的回報紀錄。")
 
     # ---------------- 功能 B：修改密碼 ----------------
     elif choice == "🔒 修改密碼":
@@ -629,13 +762,11 @@ else:
         if df.empty:
             st.info("目前尚無任何同仁提交回報資料。您可以先點選左側「📝 每日工作回報」測試送出一筆！")
         else:
-            # 確保數值與時間計算完整
             for col in ["包貨件數", "包貨總分鐘", "單件包貨耗時(分)", "寄貨件數", "客服總分鐘", "直播總分鐘"]:
                 if col not in df.columns:
                     df[col] = 0
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
                 
-            # 若舊資料尚未計算客服/直播分鐘數，即時自動補算
             df["客服總分鐘"] = df.apply(
                 lambda r: r["客服總分鐘"] if r["客服總分鐘"] > 0 else calc_minutes_str(r.get("客服開始", "無"), r.get("客服結束", "無")), axis=1
             )
@@ -646,7 +777,7 @@ else:
             df["月份"] = df["回報日期"].astype(str).str.slice(0, 7)
             df["季度"] = df["回報日期"].apply(get_quarter_label)
             
-            # 1. 篩選器（支援按月份、按季度、按同仁篩選）
+            # 1. 篩選器
             st.markdown("### 🔍 第一區：區間與人員篩選器")
             col_f1, col_f2, col_f3 = st.columns(3)
             with col_f1:
@@ -671,7 +802,7 @@ else:
             if sel_name != "全部同仁":
                 filtered_df = filtered_df[filtered_df["姓名"] == sel_name]
 
-            # 2. 頂部關鍵指標大字卡 (KPI Cards)
+            # 2. 頂部關鍵指標大字卡
             total_packs = int(filtered_df["包貨件數"].sum())
             total_pack_min = float(filtered_df["包貨總分鐘"].sum())
             avg_pack_speed = round(total_pack_min / total_packs, 2) if total_packs > 0 else 0
@@ -704,7 +835,6 @@ else:
                 summary_df["平均每件包貨耗時(分/件)"] = summary_df.apply(
                     lambda r: round(r["總包貨耗時_分"] / r["總包貨件數"], 2) if r["總包貨件數"] > 0 else 0, axis=1
                 )
-                # 調整欄位順序讓閱讀最順暢
                 summary_df = summary_df[[
                     "姓名", "出勤回報天數", "總包貨件數", "總包貨耗時_分", "平均每件包貨耗時(分/件)",
                     "總寄貨件數", "客服總時數_小時", "直播總時數_小時", "客訴發生次數"
@@ -748,7 +878,6 @@ else:
                     else:
                         st.caption("此區間尚無每日包貨趨勢數據")
 
-                # 第二排圖表：包貨與寄貨件數＆客服直播時數對比
                 chart_col3, chart_col4 = st.columns(2)
                 with chart_col3:
                     fig_vol = px.bar(
@@ -771,11 +900,10 @@ else:
 
             st.divider()
 
-            # 5. 匯出美化版分頁 Excel 報表（解決一長條難看的問題）
-            st.subheader("📥 匯出美化版分頁 Excel 報表 (自動排版/自動換行/免往右滑)")
-            st.caption("匯出的 Excel 已自動幫您拆分為 4 個精簡分頁：【1_人員統計彙整】、【2_每日作業總覽】、【3_事項與提案明細】、【4_客訴異常紀錄】，打開即可直接閱讀或列印成 PDF！")
+            # 5. 匯出美化版分頁 Excel 報表（使用純英數檔名解決瀏覽器阻擋問題）
+            st.subheader("📥 匯出美化版分頁 Excel 報表")
+            col_dl1, col_dl2 = st.columns([2, 1])
             
-            # 整理精簡版匯出表格
             df_overview_exp = pd.DataFrame({
                 "回報日期": filtered_df["回報日期"],
                 "姓名": filtered_df["姓名"],
@@ -823,20 +951,28 @@ else:
                 df_comp_exp.to_excel(writer, index=False, sheet_name="4_客訴異常紀錄")
                 style_excel_File(writer)
             
-            st.download_button(
-                label=f"📊 點擊下載【美化分頁版】Excel 報表 ({sel_period}_{sel_name}.xlsx)",
-                data=output.getvalue(),
-                file_name=f"黃金部門工作回報_{sel_period}_{sel_name}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
+            safe_period_str = sel_period if ("全部" not in sel_period) else "ALL"
+            with col_dl1:
+                st.download_button(
+                    label="📊 點擊下載【美化分頁版】Excel 報表 (.xlsx)",
+                    data=output.getvalue(),
+                    file_name=f"Gold_Report_{safe_period_str}_{datetime.date.today().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True
+                )
+            with col_dl2:
+                if st.button("✨ 手動重新美化並同步 Google 試算表", use_container_width=True):
+                    sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
+                    st.success("✅ 已將線上 Google 試算表重新排版上色並同步最新資料！")
 
             st.divider()
 
-            # 6. 每日回報詳細內容卡片檢視區
-            st.subheader("📋 每日回報詳細內容檢視（點擊卡片可展開/收合）")
+            # 6. 每日回報詳細內容卡片檢視區（含管理員單筆刪除按鈕）
+            st.subheader("📋 每日回報詳細內容檢視與刪除管理")
             sorted_df = filtered_df.iloc[::-1].reset_index(drop=True)
             for idx, row in sorted_df.iterrows():
+                r_id = row.get("回報單號", f"idx_{idx}")
                 alert_badge = " 🚨【有客訴】" if row.get("有無客訴") == "有" else ""
                 badge_8d = " 📎【附8D報告】" if row.get("有無8D") == "是" else ""
                 exp_title = f"📅 {row.get('回報日期', '')} ｜ 👤 {row.get('姓名', '')} ｜ 🕒 上下班：{row.get('上班時間', '')}~{row.get('下班時間', '')} ｜ 📦 包貨：{int(row.get('包貨件數', 0))}件 / 🚚 寄貨：{int(row.get('寄貨件數', 0))}件{alert_badge}{badge_8d}"
@@ -894,9 +1030,16 @@ else:
                         st.markdown("---")
                         b64_bytes = base64.b64decode(row["8D檔案編碼"])
                         st.download_button(
-                            label=f"📎 點擊下載 8D 報告檔案 ({row.get('8D檔名', '8D_report')})",
+                            label=f"📎 點擊下載 8D 報告檔案 ({row.get('8D檔名', '8D_report.xlsx')})",
                             data=b64_bytes,
-                            file_name=row.get("8D檔名", "8D_report"),
-                            key=f"dl_card_{row.get('回報單號', idx)}"
+                            file_name=f"8D_{r_id}_{row.get('8D檔名', 'report.xlsx')}",
+                            key=f"dl_card_{r_id}"
                         )
-                    st.caption(f"系統回報單號：{row.get('回報單號', '')} ｜ 實際送出時間：{row.get('送出時間', '')}")
+                        
+                    st.markdown("---")
+                    foot_c1, foot_c2 = st.columns([4, 1])
+                    foot_c1.caption(f"系統回報單號：{r_id} ｜ 實際送出時間：{row.get('送出時間', '')}")
+                    if foot_c2.button("🗑️ 刪除此筆回報紀錄", key=f"adm_del_{r_id}"):
+                        if delete_report_by_id(ws_reports, ws_compact, ws_comp, r_id):
+                            st.success(f"✅ 已徹底刪除 {row.get('回報日期', '')} - {row.get('姓名', '')} 的回報紀錄！")
+                            st.rerun()
