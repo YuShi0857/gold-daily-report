@@ -81,7 +81,7 @@ def parse_vals_to_df(all_vals):
         data.append([row_padded[i] for i in valid_cols])
     return pd.DataFrame(data, columns=clean_headers)
 
-# ================= 2. 資料庫連線與快取機制 (徹底杜絕 429 Quota Error) =================
+# ================= 2. 資料庫連線與快取機制 =================
 def beautify_google_sheet(ws, num_cols):
     try:
         ws.freeze(rows=1)
@@ -101,7 +101,6 @@ def beautify_google_sheet(ws, num_cols):
 
 @st.cache_resource
 def get_worksheets_cached():
-    """使用 cache_resource 確保整個網站生命週期只會初始化連線一次，不消耗每分鐘讀取額度"""
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
@@ -175,7 +174,6 @@ def get_worksheets_cached():
 
 @st.cache_data(ttl=120)
 def load_users_df():
-    """快取使用者清單 120 秒，避免重複讀取 API"""
     ws_users, _, _, _ = get_worksheets_cached()
     for attempt in range(3):
         try:
@@ -187,7 +185,6 @@ def load_users_df():
 
 @st.cache_data(ttl=120)
 def load_reports_df():
-    """快取回報資料 120 秒，頁面切換與勾選完全 0 API 消耗"""
     _, ws_reports, _, _ = get_worksheets_cached()
     for attempt in range(3):
         try:
@@ -198,12 +195,10 @@ def load_reports_df():
             time.sleep(2)
 
 def clear_all_caches():
-    """當有新增、覆蓋或刪除資料時，立即清除快取以顯示最新狀態"""
     load_users_df.clear()
     load_reports_df.clear()
 
 def sync_pretty_sheets(ws_reports, ws_compact, ws_comp, apply_style=False):
-    """將主資料庫同步至『📊 每日作業總覽』與『🚨 客訴與異常紀錄』"""
     all_vals = ws_reports.get_all_values()
     df = parse_vals_to_df(all_vals)
     compact_rows = [COMPACT_HEADERS]
@@ -871,62 +866,96 @@ else:
                 ]]
                 st.dataframe(summary_df, use_container_width=True)
 
-                # 4. 當月/當季 包貨效率與工作量視覺化分析圖表
-                st.subheader("📊 當月 / 當季包貨效率與工作量分析圖")
-                chart_col1, chart_col2 = st.columns(2)
+                # 4. 包貨效率折線圖專區（橫軸：天 / 縱軸：效率，含各同仁比較與個人單獨折線圖）
+                st.divider()
+                st.subheader("📈 每日包貨效率折線圖（橫軸：天 ／ 縱軸：單件包貨耗時分鐘）")
                 
-                with chart_col1:
-                    pack_staff_df = summary_df[summary_df["總包貨件數"] > 0]
-                    if not pack_staff_df.empty:
-                        fig_eff = px.bar(
-                            pack_staff_df,
-                            x="姓名",
-                            y="平均每件包貨耗時(分/件)",
-                            color="姓名",
-                            text="平均每件包貨耗時(分/件)",
-                            title="⏱️ 各同仁平均單件包貨耗時對比 (數值越低代表包越快)"
-                        )
-                        fig_eff.update_traces(textposition="outside")
-                        st.plotly_chart(fig_eff, use_container_width=True)
-                    else:
-                        st.caption("此區間尚無包貨數據可繪製效率對比圖")
+                daily_pack_df = filtered_df[filtered_df["包貨件數"] > 0].copy()
+                if not daily_pack_df.empty:
+                    # 依「回報日期」與「姓名」彙整每日效率，確保橫軸嚴格以「天」為單位
+                    daily_grouped = daily_pack_df.groupby(["回報日期", "姓名"], as_index=False).agg(
+                        當日包貨件數=("包貨件數", "sum"),
+                        當日包貨總分鐘=("包貨總分鐘", "sum")
+                    )
+                    daily_grouped["單件包貨耗時(分/件)"] = (
+                        daily_grouped["當日包貨總分鐘"] / daily_grouped["當日包貨件數"]
+                    ).round(2)
+                    daily_grouped = daily_grouped.sort_values("回報日期")
 
-                with chart_col2:
-                    daily_pack_df = filtered_df[filtered_df["包貨件數"] > 0].copy()
-                    if not daily_pack_df.empty:
-                        daily_pack_df = daily_pack_df.sort_values("回報日期")
-                        fig_trend = px.line(
-                            daily_pack_df,
+                    # 圖表 1：各同仁比較折線圖（所有人畫在同一張圖）
+                    st.markdown("#### 👥 各同仁包貨效率比較折線圖")
+                    fig_compare = px.line(
+                        daily_grouped,
+                        x="回報日期",
+                        y="單件包貨耗時(分/件)",
+                        color="姓名",
+                        markers=True,
+                        text="單件包貨耗時(分/件)",
+                        hover_data=["當日包貨件數", "當日包貨總分鐘"],
+                        labels={
+                            "回報日期": "日期 (天)",
+                            "單件包貨耗時(分/件)": "效率：單件包貨耗時 (分/件)"
+                        }
+                    )
+                    # 強制橫軸為類別型態，只顯示乾淨的 YYYY-MM-DD 日期，不顯示時分秒
+                    fig_compare.update_xaxes(type="category")
+                    fig_compare.update_traces(textposition="top center")
+                    st.plotly_chart(fig_compare, use_container_width=True)
+
+                    # 圖表 2：單獨同仁效率折線圖
+                    st.markdown("#### 👤 單獨同仁包貨效率折線圖")
+                    staff_list = sorted(daily_grouped["姓名"].unique().tolist())
+                    col_s1, col_s2 = st.columns([1, 2])
+                    with col_s1:
+                        target_staff = st.selectbox(
+                            "請選擇要單獨檢視折線圖的同仁：",
+                            ["📋 一次展開所有同仁各自的獨立折線圖"] + staff_list
+                        )
+                    
+                    if target_staff == "📋 一次展開所有同仁各自的獨立折線圖":
+                        cols_per_row = 2
+                        for i in range(0, len(staff_list), cols_per_row):
+                            c_list = st.columns(cols_per_row)
+                            for j in range(cols_per_row):
+                                if i + j < len(staff_list):
+                                    st_name = staff_list[i + j]
+                                    single_df = daily_grouped[daily_grouped["姓名"] == st_name]
+                                    fig_single = px.line(
+                                        single_df,
+                                        x="回報日期",
+                                        y="單件包貨耗時(分/件)",
+                                        markers=True,
+                                        text="單件包貨耗時(分/件)",
+                                        hover_data=["當日包貨件數", "當日包貨總分鐘"],
+                                        title=f"👤 {st_name} - 個人每日包貨效率折線圖",
+                                        labels={
+                                            "回報日期": "日期 (天)",
+                                            "單件包貨耗時(分/件)": "效率：單件耗時 (分/件)"
+                                        }
+                                    )
+                                    fig_single.update_xaxes(type="category")
+                                    fig_single.update_traces(line_color="#00B4D8", textposition="top center")
+                                    c_list[j].plotly_chart(fig_single, use_container_width=True)
+                    else:
+                        single_df = daily_grouped[daily_grouped["姓名"] == target_staff]
+                        fig_single = px.line(
+                            single_df,
                             x="回報日期",
-                            y="單件包貨耗時(分)",
-                            color="姓名",
+                            y="單件包貨耗時(分/件)",
                             markers=True,
-                            hover_data=["包貨件數", "包貨總分鐘"],
-                            title="📈 每日包貨效率趨勢圖 (單件耗時變化)"
+                            text="單件包貨耗時(分/件)",
+                            hover_data=["當日包貨件數", "當日包貨總分鐘"],
+                            title=f"👤 {target_staff} - 個人每日包貨效率折線圖",
+                            labels={
+                                "回報日期": "日期 (天)",
+                                "單件包貨耗時(分/件)": "效率：單件耗時 (分/件)"
+                            }
                         )
-                        st.plotly_chart(fig_trend, use_container_width=True)
-                    else:
-                        st.caption("此區間尚無每日包貨趨勢數據")
-
-                chart_col3, chart_col4 = st.columns(2)
-                with chart_col3:
-                    fig_vol = px.bar(
-                        summary_df,
-                        x="姓名",
-                        y=["總包貨件數", "總寄貨件數"],
-                        barmode="group",
-                        title="📦 各同仁總包貨件數 vs 總寄貨件數"
-                    )
-                    st.plotly_chart(fig_vol, use_container_width=True)
-                with chart_col4:
-                    fig_hr = px.bar(
-                        summary_df,
-                        x="姓名",
-                        y=["客服總時數_小時", "直播總時數_小時"],
-                        barmode="group",
-                        title="💬 各同仁客服總時數 vs 🎥 直播總時數 (小時)"
-                    )
-                    st.plotly_chart(fig_hr, use_container_width=True)
+                        fig_single.update_xaxes(type="category")
+                        fig_single.update_traces(line_color="#00B4D8", textposition="top center")
+                        st.plotly_chart(fig_single, use_container_width=True)
+                else:
+                    st.caption("目前篩選區間內尚無包貨數據可繪製效率折線圖。")
 
             st.divider()
 
