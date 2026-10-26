@@ -14,18 +14,16 @@ import time
 import plotly.express as px
 from openpyxl.styles import Font, PatternFill, Alignment
 
-# 頁面基本設定（放在第一行，確保網頁秒開不轉圈圈）
+# 頁面基本設定
 st.set_page_config(page_title="黃金部門工作回報系統", layout="wide", page_icon="✨")
 
 # 設定台灣標準時區 (UTC+8)
 TW_TZ = datetime.timezone(datetime.timedelta(hours=8))
 
 def get_tw_now():
-    """取得台灣目前的準確日期與時間 (UTC+8)"""
     return datetime.datetime.now(TW_TZ)
 
 def get_tw_today():
-    """取得台灣目前的準確日期 (UTC+8)"""
     return get_tw_now().date()
 
 # 標準中文標題列定義
@@ -53,9 +51,14 @@ COMPLAINT_HEADERS = [
     "6.解決與改善(How)", "有無附8D報告", "8D檔案名稱", "回報單號"
 ]
 
-# ================= 1. 輔助與安全函數 =================
+# ================= 1. 輔助與安全函數 (含防掉線 Token 驗證) =================
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
+
+def make_auth_token(username, pass_hash):
+    """產生專屬防掉線安全憑證，讓網頁就算重整也不會踢出登入"""
+    raw = f"{username}_{pass_hash}_gold_stay_logged_in"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 def calc_minutes(t_start, t_end):
     dt1 = datetime.datetime.combine(get_tw_today(), t_start)
@@ -112,7 +115,6 @@ def beautify_google_sheet(ws, num_cols):
 
 @st.cache_resource
 def get_worksheets_cached():
-    """極速秒開版：只做純連線，不執行額外檢查與格式寫入，確保多人同時開啟不卡死"""
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
@@ -141,7 +143,7 @@ def get_worksheets_cached():
         
     return ws_users, ws_reports, ws_compact, ws_comp
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=180)
 def load_users_df():
     ws_users, _, _, _ = get_worksheets_cached()
     for attempt in range(3):
@@ -152,7 +154,7 @@ def load_users_df():
                 raise e
             time.sleep(1.5)
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=180)
 def load_reports_df():
     _, ws_reports, _, _ = get_worksheets_cached()
     for attempt in range(3):
@@ -304,12 +306,12 @@ def send_reset_email(receiver_email, new_pass):
         st.error(f"郵件發送失敗，請確認後台設定：{e}")
         return False
 
-# ================= 3. 狀態管理初始化 =================
+# ================= 3. 狀態管理與「自動接回登入」機制 =================
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.user_info = {}
 if "task_rows" not in st.session_state:
-    st.session_state.task_rows = 1
+    st.session_state.task_rows = 3 # 預設直接提供 3 列時段，減少頻繁按按鈕重整
 if "form_ver" not in st.session_state:
     st.session_state.form_ver = 0
 if "submit_success_msg" not in st.session_state:
@@ -317,16 +319,41 @@ if "submit_success_msg" not in st.session_state:
 if "confirm_del_id" not in st.session_state:
     st.session_state.confirm_del_id = None
 
-# ================= 4. 未登入畫面（延遲連線：打開網頁瞬間 0 API 呼叫，保證秒開！） =================
+# 【關鍵防掉線機制】：若網頁因手機網路瞬斷或重整導致 session 重置，自動從網址安全憑證無感恢復登入！
+if not st.session_state.logged_in:
+    saved_u = st.query_params.get("u", "")
+    saved_t = st.query_params.get("t", "")
+    if saved_u and saved_t:
+        try:
+            users_df = load_users_df()
+            if not users_df.empty and saved_u in users_df["登入帳號"].values:
+                urow = users_df[users_df["登入帳號"] == saved_u].iloc[0]
+                expected_t = make_auth_token(saved_u, urow["密碼雜湊"])
+                if saved_t == expected_t:
+                    st.session_state.logged_in = True
+                    st.session_state.user_info = {
+                        "username": urow["登入帳號"],
+                        "password_hash": urow["密碼雜湊"],
+                        "name": urow["真實姓名"],
+                        "email": urow["綁定信箱"],
+                        "role": urow["系統權限"]
+                    }
+        except:
+            pass
+
+# ================= 4. 未登入畫面 =================
 if not st.session_state.logged_in:
     st.title("✨ 黃金部門工作回報系統")
     tab1, tab2, tab3 = st.tabs(["🔑 登入系統", "📝 新人註冊", "❓ 忘記密碼"])
     
     with tab1:
         st.subheader("員工/管理員登入")
-        login_user = st.text_input("帳號", key="l_user")
-        login_pass = st.text_input("密碼", type="password", key="l_pass")
-        if st.button("登入", type="primary"):
+        with st.form("login_form"):
+            login_user = st.text_input("帳號")
+            login_pass = st.text_input("密碼", type="password")
+            login_submit = st.form_submit_button("🔑 登入系統", type="primary", use_container_width=True)
+            
+        if login_submit:
             with st.spinner("🔄 正在驗證帳號..."):
                 users_df = load_users_df()
                 if not users_df.empty and login_user.strip() in users_df["登入帳號"].values:
@@ -340,6 +367,9 @@ if not st.session_state.logged_in:
                             "email": user_row["綁定信箱"],
                             "role": user_row["系統權限"]
                         }
+                        # 寫入網址防掉線憑證，確保重整絕不踢出
+                        st.query_params["u"] = user_row["登入帳號"]
+                        st.query_params["t"] = make_auth_token(user_row["登入帳號"], user_row["密碼雜湊"])
                         st.rerun()
                     else:
                         st.error("❌ 密碼錯誤！")
@@ -348,13 +378,15 @@ if not st.session_state.logged_in:
 
     with tab2:
         st.subheader("註冊新帳號")
-        reg_name = st.text_input("真實姓名 (將自動綁定未來的回報單)")
-        reg_email = st.text_input("常用信箱 (忘記密碼寄信用，請務必填寫正確)")
-        reg_user = st.text_input("設定登入帳號")
-        reg_pass1 = st.text_input("設定密碼", type="password")
-        reg_pass2 = st.text_input("再次確認密碼", type="password")
-        
-        if st.button("註冊帳號"):
+        with st.form("register_form"):
+            reg_name = st.text_input("真實姓名 (將自動綁定未來的回報單)")
+            reg_email = st.text_input("常用信箱 (忘記密碼寄信用，請務必填寫正確)")
+            reg_user = st.text_input("設定登入帳號")
+            reg_pass1 = st.text_input("設定密碼", type="password")
+            reg_pass2 = st.text_input("再次確認密碼", type="password")
+            reg_submit = st.form_submit_button("📝 立即註冊帳號", type="primary", use_container_width=True)
+            
+        if reg_submit:
             if not all([reg_name.strip(), reg_email.strip(), reg_user.strip(), reg_pass1.strip(), reg_pass2.strip()]):
                 st.warning("⚠️ 所有欄位皆為必填！")
             elif reg_pass1 != reg_pass2:
@@ -374,9 +406,12 @@ if not st.session_state.logged_in:
 
     with tab3:
         st.subheader("忘記密碼 / 重新寄送臨時密碼")
-        fp_user = st.text_input("請輸入您的帳號")
-        fp_email = st.text_input("請輸入註冊時綁定的信箱")
-        if st.button("寄送重設密碼信"):
+        with st.form("fp_form"):
+            fp_user = st.text_input("請輸入您的帳號")
+            fp_email = st.text_input("請輸入註冊時綁定的信箱")
+            fp_submit = st.form_submit_button("📧 寄送重設密碼信", type="primary")
+            
+        if fp_submit:
             with st.spinner("🔄 正在驗證信箱並發送郵件..."):
                 ws_users, _, _, _ = get_worksheets_cached()
                 users_df = load_users_df()
@@ -400,13 +435,14 @@ else:
     try:
         ws_users, ws_reports, ws_compact, ws_comp = get_worksheets_cached()
     except Exception as e:
-        st.warning("⏳ 系統正在冷卻連線頻率，請等待約 15 秒後按 F5 重新整理網頁即可恢復正常！")
+        st.warning("⏳ 系統正在冷卻連線頻率，請等待約 10 秒後按 F5 重新整理網頁（您的登入狀態已鎖定保護，不會被登出）！")
         st.stop()
 
     user = st.session_state.user_info
     st.sidebar.title(f"👋 您好，{user['name']}")
     st.sidebar.caption(f"身份：{'👑 管理員' if user['role'] == 'admin' else '👤 部門同仁'}")
     st.sidebar.caption(f"🕒 台灣時間：{get_tw_now().strftime('%Y-%m-%d %H:%M')}")
+    st.sidebar.success("🔒 防掉線保護已啟動（重整不登出）")
     
     menu_options = ["📝 每日工作回報", "🔒 修改密碼"]
     if user["role"] == "admin":
@@ -417,6 +453,7 @@ else:
     if st.sidebar.button("🚪 登出系統"):
         st.session_state.logged_in = False
         st.session_state.user_info = {}
+        st.query_params.clear()
         st.rerun()
 
     # ---------------- 功能 A：每日工作回報 ----------------
@@ -428,151 +465,162 @@ else:
             st.success(st.session_state.submit_success_msg)
             st.session_state.submit_success_msg = ""
 
-        st.info(f"📌 填表人：**{user['name']}** ｜ 💡 **防呆提示**：若您發現今天送出的內容有誤，只要選同一個日期**直接重新填寫並送出**，系統就會自動幫您刪除舊的那筆、覆蓋為最新內容！")
+        st.info(f"📌 填表人：**{user['name']}** ｜ 🛡️ **防消失升級**：目前已開啟「穩定填表模式」，調整時間與打字時網頁**不會閃爍刷新**，且登入狀態已鎖定，請安心填寫！")
         
         fv = st.session_state.form_ver
-        report_date = st.date_input("📅 回報歸屬日期 (預設為台灣今日)", get_tw_today(), key=f"rdate_{fv}")
         
-        df_check = load_reports_df()
-        already_submitted = False
-        if not df_check.empty:
-            dup_check = df_check[(df_check["帳號"] == user["username"]) & (df_check["回報日期"] == str(report_date))]
-            if not dup_check.empty:
-                already_submitted = True
-                st.warning(f"⚠️ 系統偵測到您在 **{report_date}** 已經提交過回報！若您現在再次送出，將會**自動覆蓋並刪除**當天舊的那筆紀錄。")
-        
-        st.markdown("### 一、 基礎出勤與作業數據")
-        col1, col2 = st.columns(2)
-        with col1:
-            work_start = st.time_input("🕒 上班時間", datetime.time(9, 0), step=60, key=f"ws_{fv}")
-        with col2:
-            work_end = st.time_input("🕕 下班時間", datetime.time(18, 0), step=60, key=f"we_{fv}")
-            
-        st.markdown("#### 📦 包貨與寄貨紀錄（有執行才需勾選填寫）")
-        col_chk1, col_chk2 = st.columns(2)
-        
-        pack_start_str, pack_end_str = "無", "無"
-        pack_count, pack_duration, min_per_pack = 0, 0, 0
-        
-        with col_chk1:
+        # 先在最上方選擇今日有哪些特殊項目（勾選後下方表單一次展開，打字過程零刷新！）
+        st.markdown("### 📌 步驟一：請先勾選今日有執行的作業項目")
+        st.caption("（有執行的打勾即可，下方填表區在您打字與調整時間時，完全不會刷新畫面！）")
+        chk_c1, chk_c2, chk_c3, chk_c4, chk_c5, chk_c6 = st.columns(6)
+        with chk_c1:
             has_pack = st.checkbox("📦 今日有包貨", key=f"hp_{fv}")
+        with chk_c2:
+            has_ship = st.checkbox("🚚 今日有寄貨", key=f"hs_{fv}")
+        with chk_c3:
+            has_cs = st.checkbox("💬 今日有客服", key=f"hcs_{fv}")
+        with chk_c4:
+            has_live = st.checkbox("🎥 今日有直播", key=f"hlv_{fv}")
+        with chk_c5:
+            has_complaint_chk = st.checkbox("🚨 今日有客訴", key=f"hc_{fv}")
+        with chk_c6:
+            has_8d = st.checkbox("📄 需附 8D 檔案", key=f"h8d_{fv}")
+
+        col_btn1, col_btn2, _ = st.columns([1.5, 1.5, 4])
+        with col_btn1:
+            if st.button("➕ 增加處理事項欄位 (目前 " + str(st.session_state.task_rows) + " 條)"):
+                st.session_state.task_rows += 2
+                st.rerun()
+        with col_btn2:
+            if st.button("➖ 減少處理事項欄位") and st.session_state.task_rows > 1:
+                st.session_state.task_rows = max(1, st.session_state.task_rows - 1)
+                st.rerun()
+
+        # 【核心防消失設計】：使用 st.form 將所有時間與文字輸入框保護起來！
+        # 員工在裡面打字、改時間，瀏覽器完全不會重整、不會發送請求，直到最後按下送出！
+        with st.form(key=f"daily_report_form_{fv}", clear_on_submit=False):
+            st.markdown("### 📝 步驟二：填寫今日工作內容（打字過程零刷新保護中）")
+            report_date = st.date_input("📅 回報歸屬日期 (預設為台灣今日)", get_tw_today())
+            
+            st.markdown("#### 一、 基礎出勤與作業數據")
+            col1, col2 = st.columns(2)
+            with col1:
+                work_start = st.time_input("🕒 上班時間", datetime.time(9, 0), step=60)
+            with col2:
+                work_end = st.time_input("🕕 下班時間", datetime.time(18, 0), step=60)
+                
+            pack_start = datetime.time(10, 0)
+            pack_end = datetime.time(12, 0)
+            pack_count = 0
             if has_pack:
+                st.markdown("##### 📦 包貨紀錄")
                 c_p1, c_p2, c_p3 = st.columns(3)
                 with c_p1:
-                    pack_start = st.time_input("包貨開始時間", datetime.time(10, 0), step=60, key=f"ps_{fv}")
+                    pack_start = st.time_input("包貨開始時間", datetime.time(10, 0), step=60)
                 with c_p2:
-                    pack_end = st.time_input("包貨結束時間", datetime.time(12, 0), step=60, key=f"pe_{fv}")
+                    pack_end = st.time_input("包貨結束時間", datetime.time(12, 0), step=60)
                 with c_p3:
-                    pack_count = st.number_input("個人包貨件數", min_value=1, value=1, step=1, key=f"pc_{fv}")
-                pack_start_str = pack_start.strftime("%H:%M")
-                pack_end_str = pack_end.strftime("%H:%M")
-                pack_duration = calc_minutes(pack_start, pack_end)
-                min_per_pack = round(pack_duration / pack_count, 2) if pack_count > 0 else 0
+                    pack_count = st.number_input("個人包貨件數", min_value=1, value=1, step=1)
 
-        ship_count = 0
-        with col_chk2:
-            has_ship = st.checkbox("🚚 今日有寄貨", key=f"hs_{fv}")
+            ship_count = 0
             if has_ship:
-                ship_count = st.number_input("今日寄貨件數", min_value=1, value=1, step=1, key=f"sc_{fv}")
-            
-        st.markdown("#### 💬 客服與直播紀錄（有執行才需勾選填寫）")
-        col_chk3, col_chk4 = st.columns(2)
-        
-        cs_start_str, cs_end_str = "無", "無"
-        cs_duration = 0
-        with col_chk3:
-            has_cs = st.checkbox("💬 今日有客服回覆", key=f"hcs_{fv}")
+                st.markdown("##### 🚚 寄貨紀錄")
+                ship_count = st.number_input("今日寄貨件數", min_value=1, value=1, step=1)
+                
+            cs_start = datetime.time(9, 0)
+            cs_end = datetime.time(18, 0)
             if has_cs:
+                st.markdown("##### 💬 客服回覆紀錄")
                 c_l1, c_l2 = st.columns(2)
                 with c_l1:
-                    cs_start = st.time_input("客服回覆開始", datetime.time(9, 0), step=60, key=f"css_{fv}")
+                    cs_start = st.time_input("客服回覆開始", datetime.time(9, 0), step=60)
                 with c_l2:
-                    cs_end = st.time_input("客服回覆結束", datetime.time(18, 0), step=60, key=f"cse_{fv}")
-                cs_start_str = cs_start.strftime("%H:%M")
-                cs_end_str = cs_end.strftime("%H:%M")
-                cs_duration = calc_minutes(cs_start, cs_end)
+                    cs_end = st.time_input("客服回覆結束", datetime.time(18, 0), step=60)
 
-        live_start_str, live_end_str = "無", "無"
-        live_duration = 0
-        with col_chk4:
-            has_live = st.checkbox("🎥 今日有直播", key=f"hlv_{fv}")
+            live_start = datetime.time(19, 0)
+            live_end = datetime.time(22, 0)
             if has_live:
+                st.markdown("##### 🎥 直播紀錄")
                 c_l3, c_l4 = st.columns(2)
                 with c_l3:
-                    live_start = st.time_input("今日直播開始", datetime.time(19, 0), step=60, key=f"lvs_{fv}")
+                    live_start = st.time_input("今日直播開始", datetime.time(19, 0), step=60)
                 with c_l4:
-                    live_end = st.time_input("今日直播結束", datetime.time(22, 0), step=60, key=f"lve_{fv}")
-                live_start_str = live_start.strftime("%H:%M")
-                live_end_str = live_end.strftime("%H:%M")
-                live_duration = calc_minutes(live_start, live_end)
+                    live_end = st.time_input("今日直播結束", datetime.time(22, 0), step=60)
 
-        st.divider()
-        
-        # 動態展開：客訴與 8D
-        st.markdown("### 二、 客訴與重大異常回報")
-        has_complaint = st.radio("🚨 今日是否有任何客訴？", ["無", "有"], horizontal=True, key=f"hc_{fv}")
-        c_who = c_where = c_when = c_what = c_why = c_how = ""
-        
-        if has_complaint == "有":
-            st.warning("⚠️ 請詳細填寫以下客訴 5W1H 資訊：")
-            c_who = st.text_input("1. 【Who】客人本名 + TK名 / 帳號名稱", key=f"cwho_{fv}")
-            c_where = st.selectbox("2. 【Where】客訴發生管道", ["直播上", "LINE客服上", "LINE社群", "其他"], key=f"cwhere_{fv}")
-            c_when = st.text_input("3. 【When】幾月幾號的訂單 及 客訴發生日期", key=f"cwhen_{fv}")
-            c_what = st.text_area("4. 【What】發生什麼事 / 商品的問題 (請詳細打字說明)", key=f"cwhat_{fv}")
-            c_why = st.text_area("5. 【Why】客訴背後原因分析", key=f"cwhy_{fv}")
-            c_how = st.text_area("6. 【How】執行方法 / 解決方案 / 未來如何改善", key=f"chow_{fv}")
+            c_who = c_where = c_when = c_what = c_why = c_how = ""
+            if has_complaint_chk:
+                st.divider()
+                st.markdown("#### 二、 🚨 客訴 5W1H 詳細回報")
+                c_who = st.text_input("1. 【Who】客人本名 + TK名 / 帳號名稱")
+                c_where = st.selectbox("2. 【Where】客訴發生管道", ["直播上", "LINE客服上", "LINE社群", "其他"])
+                c_when = st.text_input("3. 【When】幾月幾號的訂單 及 客訴發生日期")
+                c_what = st.text_area("4. 【What】發生什麼事 / 商品的問題 (請詳細打字說明)")
+                c_why = st.text_area("5. 【Why】客訴背後原因分析")
+                c_how = st.text_area("6. 【How】執行方法 / 解決方案 / 未來如何改善")
 
-        has_8d = st.checkbox("📄 若有重大異常，需填寫並附上 8D 報告檔案", key=f"h8d_{fv}")
-        file_8d_name, file_8d_b64 = "", ""
-        if has_8d:
-            uploaded_8d = st.file_uploader("請上傳填妥之 8D 檔案 (支援 Excel, Word, PDF，建議小於 1MB)", type=["xlsx", "xls", "docx", "doc", "pdf"], key=f"u8d_{fv}")
-            if uploaded_8d is not None:
+            uploaded_8d = None
+            if has_8d:
+                st.divider()
+                st.markdown("#### 📄 重大異常 8D 報告檔案上傳")
+                uploaded_8d = st.file_uploader("請上傳填妥之 8D 檔案 (支援 Excel, Word, PDF，建議小於 1MB)", type=["xlsx", "xls", "docx", "doc", "pdf"])
+
+            st.divider()
+            st.markdown("#### 三、 今日處理事項明細")
+            st.caption("請填寫幾點幾分到幾點幾分做了哪些事（空白未填的列會自動忽略，不夠可在上方點『➕ 增加處理事項欄位』）")
+            
+            raw_tasks_inputs = []
+            for i in range(st.session_state.task_rows):
+                t_col1, t_col2, t_col3 = st.columns([1.5, 1.5, 5])
+                default_h1 = min(9 + i, 22)
+                default_h2 = min(10 + i, 23)
+                with t_col1:
+                    ts = st.time_input(f"開始時間 #{i+1}", datetime.time(default_h1, 0), key=f"ts_{fv}_{i}", step=60)
+                with t_col2:
+                    te = st.time_input(f"結束時間 #{i+1}", datetime.time(default_h2, 0), key=f"te_{fv}_{i}", step=60)
+                with t_col3:
+                    td = st.text_input(f"處理事項內容 #{i+1}", placeholder="請輸入該時段具體完成的事項（無則留空即可）...", key=f"td_{fv}_{i}")
+                raw_tasks_inputs.append((ts, te, td))
+
+            st.divider()
+            st.markdown("#### 四、 提案改善與同仁想法回饋")
+            improvement_proposal = st.text_area("💡 提案改善欄位 (針對作業流程、商品、工具有任何優化建議皆可提出)")
+            peer_feedback = st.text_area("🤝 針對其他同仁有任何想法或建議 (僅主管後台可見)")
+
+            submit_btn = st.form_submit_button("🚀 確認無誤，送出今日回報", type="primary", use_container_width=True)
+
+        if submit_btn:
+            tasks_list = []
+            for ts, te, td in raw_tasks_inputs:
+                if td.strip():
+                    tasks_list.append(f"【{ts.strftime('%H:%M')} - {te.strftime('%H:%M')}】{td.strip()}")
+                    
+            has_complaint = "有" if has_complaint_chk else "無"
+            file_8d_name, file_8d_b64 = "", ""
+            if has_8d and uploaded_8d is not None:
                 file_8d_name = uploaded_8d.name
                 file_8d_b64 = base64.b64encode(uploaded_8d.read()).decode("utf-8")
 
-        st.divider()
-
-        # 動態增減：今日處理事項
-        st.markdown("### 三、 今日處理事項明細")
-        st.caption("請清楚標註幾點幾分到幾點幾分做了哪些事（制式規格，不夠可按下方按鈕新增列）")
-        
-        col_btn1, col_btn2, _ = st.columns([1, 1, 4])
-        with col_btn1:
-            if st.button("➕ 新增時段項目"):
-                st.session_state.task_rows += 1
-        with col_btn2:
-            if st.button("➖ 減少最後一列") and st.session_state.task_rows > 1:
-                st.session_state.task_rows -= 1
-
-        tasks_list = []
-        for i in range(st.session_state.task_rows):
-            t_col1, t_col2, t_col3 = st.columns([1.5, 1.5, 5])
-            with t_col1:
-                ts = st.time_input(f"開始時間 #{i+1}", datetime.time(9, 0), key=f"ts_{fv}_{i}", step=60)
-            with t_col2:
-                te = st.time_input(f"結束時間 #{i+1}", datetime.time(10, 0), key=f"te_{fv}_{i}", step=60)
-            with t_col3:
-                td = st.text_input(f"處理事項內容 #{i+1}", placeholder="請輸入該時段具體完成的事項...", key=f"td_{fv}_{i}")
-            if td.strip():
-                tasks_list.append(f"【{ts.strftime('%H:%M')} - {te.strftime('%H:%M')}】{td.strip()}")
-
-        st.divider()
-
-        # 提案與回饋
-        st.markdown("### 四、 提案改善與同仁想法回饋")
-        improvement_proposal = st.text_area("💡 提案改善欄位 (針對作業流程、商品、工具有任何優化建議皆可提出)", key=f"imp_{fv}")
-        peer_feedback = st.text_area("🤝 針對其他同仁有任何想法或建議 (僅主管後台可見)", key=f"peer_{fv}")
-
-        btn_label = "🔄 確認無誤，覆蓋更新今日回報" if already_submitted else "🚀 確認無誤，送出今日回報"
-        if st.button(btn_label, type="primary", use_container_width=True):
-            if has_complaint == "有" and not all([c_who, c_when, c_what, c_why, c_how]):
-                st.error("❌ 您勾選了「有客訴」，請將 Who / When / What / Why / How 所有欄位填寫完整！")
+            if has_complaint == "有" and not all([c_who.strip(), c_when.strip(), c_what.strip(), c_why.strip(), c_how.strip()]):
+                st.error("❌ 您勾選了「今日有客訴」，請將 Who / When / What / Why / How 所有欄位填寫完整！（您剛剛填寫的文字都還保留在上方格子內，補齊後再按送出即可）")
             elif has_8d and not file_8d_name:
-                st.error("❌ 您勾選了「需填寫8D」，請務必上傳 8D 檔案！")
+                st.error("❌ 您勾選了「需附 8D 檔案」，請務必選擇檔案上傳！")
             elif not tasks_list:
-                st.error("❌ 請至少填寫一條「今日處理事項」！")
+                st.error("❌ 請至少填寫一條「今日處理事項」！（填寫後再按送出即可）")
             else:
                 with st.spinner("🚀 正在安全傳送您的回報資料..."):
+                    pack_start_str = pack_start.strftime("%H:%M") if has_pack else "無"
+                    pack_end_str = pack_end.strftime("%H:%M") if has_pack else "無"
+                    pack_duration = calc_minutes(pack_start, pack_end) if has_pack else 0
+                    min_per_pack = round(pack_duration / pack_count, 2) if (has_pack and pack_count > 0) else 0
+
+                    cs_start_str = cs_start.strftime("%H:%M") if has_cs else "無"
+                    cs_end_str = cs_end.strftime("%H:%M") if has_cs else "無"
+                    cs_duration = calc_minutes(cs_start, cs_end) if has_cs else 0
+
+                    live_start_str = live_start.strftime("%H:%M") if has_live else "無"
+                    live_end_str = live_end.strftime("%H:%M") if has_live else "無"
+                    live_duration = calc_minutes(live_start, live_end) if has_live else 0
+
                     was_overwritten = delete_existing_same_day_report(ws_reports, user["username"], str(report_date))
                     
                     now_tw = get_tw_now()
@@ -587,13 +635,13 @@ else:
                         work_end.strftime("%H:%M"),
                         pack_start_str,
                         pack_end_str,
-                        pack_count,
+                        pack_count if has_pack else 0,
                         pack_duration,
                         min_per_pack,
                         cs_start_str,
                         cs_end_str,
                         cs_duration,
-                        ship_count,
+                        ship_count if has_ship else 0,
                         live_start_str,
                         live_end_str,
                         live_duration,
@@ -610,7 +658,7 @@ else:
                     sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
                     clear_all_caches()
                     
-                    st.session_state.task_rows = 1
+                    st.session_state.task_rows = 3
                     st.session_state.form_ver += 1
                     if was_overwritten:
                         st.session_state.submit_success_msg = f"✅ 【覆蓋成功】您於 {report_date} 的舊回報已自動刪除，並更新為最新送出的內容（送出時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}）！下方表單已自動清空。"
@@ -621,6 +669,7 @@ else:
         # 同仁自行撤回近期回報紀錄（含二次確認防呆機制）
         st.divider()
         with st.expander("🗂️ 檢視 / 撤回我近期已送出的回報紀錄"):
+            df_check = load_reports_df()
             if not df_check.empty:
                 my_df = df_check[df_check["帳號"] == user["username"]].sort_values(by=["回報日期", "送出時間"], ascending=[False, False]).head(10)
                 if not my_df.empty:
@@ -653,10 +702,13 @@ else:
     # ---------------- 功能 B：修改密碼 ----------------
     elif choice == "🔒 修改密碼":
         st.title("🔒 修改個人密碼")
-        old_p = st.text_input("請輸入舊密碼 (或信箱收到的臨時密碼)", type="password")
-        new_p1 = st.text_input("請輸入新密碼", type="password")
-        new_p2 = st.text_input("請再次確認新密碼", type="password")
-        if st.button("更新密碼", type="primary"):
+        with st.form("change_pw_form"):
+            old_p = st.text_input("請輸入舊密碼 (或信箱收到的臨時密碼)", type="password")
+            new_p1 = st.text_input("請輸入新密碼", type="password")
+            new_p2 = st.text_input("請再次確認新密碼", type="password")
+            pw_submit = st.form_submit_button("更新密碼", type="primary")
+            
+        if pw_submit:
             if new_p1 != new_p2:
                 st.error("❌ 兩次新密碼輸入不一致！")
             elif hash_password(old_p) != user["password_hash"]:
@@ -668,6 +720,7 @@ else:
                     ws_users.update_cell(row_idx, 2, new_hash)
                     clear_all_caches()
                     st.session_state.user_info["password_hash"] = new_hash
+                    st.query_params["t"] = make_auth_token(user["username"], new_hash)
                     st.success("✅ 密碼更新成功！")
 
     # ---------------- 功能 C：帳號與權限管理 ----------------
