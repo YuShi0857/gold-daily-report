@@ -356,6 +356,8 @@ if "form_ver" not in st.session_state:
     st.session_state.form_ver = 0
 if "submit_success_msg" not in st.session_state:
     st.session_state.submit_success_msg = ""
+if "confirm_del_id" not in st.session_state:
+    st.session_state.confirm_del_id = None
 
 try:
     ws_users, ws_reports, ws_compact, ws_comp = get_worksheets_cached()
@@ -652,18 +654,33 @@ else:
                     st.session_state.submit_success_msg = f"🎉 【送出成功】您於 {report_date} 的工作回報已成功送出（送出時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}）！下方表單已自動清空。"
                 st.rerun()
 
+        # 同仁自行撤回近期回報紀錄（含二次確認防呆機制）
         st.divider()
         with st.expander("🗂️ 檢視 / 撤回我近期已送出的回報紀錄"):
             if not df_check.empty:
                 my_df = df_check[df_check["帳號"] == user["username"]].sort_values(by=["回報日期", "送出時間"], ascending=[False, False]).head(10)
                 if not my_df.empty:
                     for _, mrow in my_df.iterrows():
-                        mc1, mc2 = st.columns([5, 1])
+                        m_id = mrow["回報單號"]
+                        mc1, mc2 = st.columns([4, 2])
                         mc1.markdown(f"**📅 日期：{mrow['回報日期']}** ｜ 送出時間：`{mrow['送出時間']}` ｜ 包貨：{mrow['包貨件數']}件 / 寄貨：{mrow['寄貨件數']}件 ｜ 事項：{str(mrow['今日處理事項'])[:30]}...")
-                        if mc2.button("🗑️ 撤回刪除", key=f"self_del_{mrow['回報單號']}"):
-                            delete_report_by_id(ws_reports, ws_compact, ws_comp, mrow["回報單號"])
-                            st.success(f"✅ 已成功刪除您於 {mrow['回報日期']} 的回報紀錄！")
-                            st.rerun()
+                        
+                        with mc2:
+                            if st.session_state.confirm_del_id == f"self_{m_id}":
+                                st.warning(f"⚠️ 確定要撤回刪除 {mrow['回報日期']} 的回報嗎？")
+                                sc1, sc2 = st.columns(2)
+                                if sc1.button("✅ 確定刪除", key=f"yes_self_{m_id}", type="primary", use_container_width=True):
+                                    delete_report_by_id(ws_reports, ws_compact, ws_comp, m_id)
+                                    st.session_state.confirm_del_id = None
+                                    st.success(f"✅ 已成功刪除您於 {mrow['回報日期']} 的回報紀錄！")
+                                    st.rerun()
+                                if sc2.button("❌ 取消", key=f"no_self_{m_id}", use_container_width=True):
+                                    st.session_state.confirm_del_id = None
+                                    st.rerun()
+                            else:
+                                if st.button("🗑️ 撤回刪除", key=f"self_del_{m_id}", use_container_width=True):
+                                    st.session_state.confirm_del_id = f"self_{m_id}"
+                                    st.rerun()
                 else:
                     st.caption("您目前尚無任何已送出的回報紀錄。")
             else:
@@ -1037,7 +1054,7 @@ else:
 
             st.divider()
 
-            # 6. 每日回報詳細內容卡片檢視區（內建獨立的月份、同仁、日期與客訴篩選器）
+            # 6. 每日回報詳細內容卡片檢視區（含管理員單筆刪除二次確認防呆機制）
             st.subheader("📋 每日回報詳細內容檢視與刪除管理")
             st.caption("可於下方直接選擇想查看的月份、同仁或特定日期（預設自動與上方篩選器連動，亦可直接在此獨立切換）：")
             
@@ -1142,9 +1159,22 @@ else:
                             )
                             
                         st.markdown("---")
-                        foot_c1, foot_c2 = st.columns([4, 1])
+                        foot_c1, foot_c2 = st.columns([3, 2])
                         foot_c1.caption(f"系統回報單號：{r_id} ｜ 實際送出時間 (台灣時間)：{row.get('送出時間', '')}")
-                        if foot_c2.button("🗑️ 刪除此筆回報紀錄", key=f"adm_del_{r_id}"):
-                            if delete_report_by_id(ws_reports, ws_compact, ws_comp, r_id):
-                                st.success(f"✅ 已徹底刪除 {row.get('回報日期', '')} - {row.get('姓名', '')} 的回報紀錄！")
-                                st.rerun()
+                        
+                        with foot_c2:
+                            if st.session_state.confirm_del_id == f"adm_{r_id}":
+                                st.warning(f"⚠️ 確定要永久刪除「{row.get('回報日期', '')} - {row.get('姓名', '')}」的回報嗎？（刪除後無法復原）")
+                                dc1, dc2 = st.columns(2)
+                                if dc1.button("✅ 確定永久刪除", key=f"yes_adm_{r_id}", type="primary", use_container_width=True):
+                                    if delete_report_by_id(ws_reports, ws_compact, ws_comp, r_id):
+                                        st.session_state.confirm_del_id = None
+                                        st.success(f"✅ 已徹底刪除 {row.get('回報日期', '')} - {row.get('姓名', '')} 的回報紀錄！")
+                                        st.rerun()
+                                if dc2.button("❌ 取消", key=f"no_adm_{r_id}", use_container_width=True):
+                                    st.session_state.confirm_del_id = None
+                                    st.rerun()
+                            else:
+                                if st.button("🗑️ 刪除此筆回報紀錄", key=f"adm_del_{r_id}", use_container_width=True):
+                                    st.session_state.confirm_del_id = f"adm_{r_id}"
+                                    st.rerun()
