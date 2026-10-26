@@ -14,7 +14,7 @@ import time
 import plotly.express as px
 from openpyxl.styles import Font, PatternFill, Alignment
 
-# 頁面基本設定
+# 頁面基本設定（放在第一行，確保網頁秒開不轉圈圈）
 st.set_page_config(page_title="黃金部門工作回報系統", layout="wide", page_icon="✨")
 
 # 設定台灣標準時區 (UTC+8)
@@ -92,7 +92,7 @@ def parse_vals_to_df(all_vals):
         data.append([row_padded[i] for i in valid_cols])
     return pd.DataFrame(data, columns=clean_headers)
 
-# ================= 2. 資料庫連線與快取機制 =================
+# ================= 2. 極速資料庫連線與快取機制 =================
 def beautify_google_sheet(ws, num_cols):
     try:
         ws.freeze(rows=1)
@@ -112,6 +112,7 @@ def beautify_google_sheet(ws, num_cols):
 
 @st.cache_resource
 def get_worksheets_cached():
+    """極速秒開版：只做純連線，不執行額外檢查與格式寫入，確保多人同時開啟不卡死"""
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
@@ -126,61 +127,18 @@ def get_worksheets_cached():
     ws_users = sh.worksheet("users")
     ws_reports = sh.worksheet("reports")
     
-    # 1. 檢查並初始化 users 分頁
-    u_headers = ws_users.row_values(1)
-    if not u_headers:
-        ws_users.append_row(["登入帳號", "密碼雜湊", "真實姓名", "綁定信箱", "系統權限", "建立時間"])
-        admin_pass = hashlib.sha256("admin888".encode()).hexdigest()
-        ws_users.append_row(["admin", admin_pass, "系統管理員", st.secrets["smtp"]["sender_email"], "admin", get_tw_now().strftime("%Y-%m-%d %H:%M:%S")])
-    elif u_headers[0] == "username":
-        ws_users.update("A1:F1", [["登入帳號", "密碼雜湊", "真實姓名", "綁定信箱", "系統權限", "建立時間"]])
-
-    # 2. 檢查並初始化 reports 分頁
-    r_vals = ws_reports.get_all_values()
-    if not r_vals:
-        ws_reports.append_row(REPORT_HEADERS)
-    elif r_vals[0][0] == "report_id" or len(r_vals[0]) < len(REPORT_HEADERS):
-        new_rows = [REPORT_HEADERS]
-        for r in r_vals[1:]:
-            if not any(str(c).strip() for c in r):
-                continue
-            r_pad = r + [""] * max(0, 32 - len(r))
-            if len(r) <= 30 and r_vals[0][0] == "report_id":
-                cs_m = calc_minutes_str(r_pad[12], r_pad[13])
-                lv_m = calc_minutes_str(r_pad[15], r_pad[16])
-                upgraded = r_pad[:14] + [cs_m, r_pad[14], r_pad[15], r_pad[16], lv_m] + r_pad[17:30]
-                new_rows.append(upgraded)
-            else:
-                new_rows.append(r_pad[:len(REPORT_HEADERS)])
-        ws_reports.clear()
-        ws_reports.update(new_rows)
-
-    # 3. 檢查並建立精簡版中文分頁
-    existing_titles = [w.title for w in sh.worksheets()]
-    need_init_sync = False
-    if "📊 每日作業總覽" not in existing_titles:
+    try:
+        ws_compact = sh.worksheet("📊 每日作業總覽")
+    except:
         ws_compact = sh.add_worksheet(title="📊 每日作業總覽", rows="1000", cols="14")
         ws_compact.append_row(COMPACT_HEADERS)
-        beautify_google_sheet(ws_compact, len(COMPACT_HEADERS))
-        need_init_sync = True
-    else:
-        ws_compact = sh.worksheet("📊 每日作業總覽")
         
-    if "🚨 客訴與異常紀錄" not in existing_titles:
+    try:
+        ws_comp = sh.worksheet("🚨 客訴與異常紀錄")
+    except:
         ws_comp = sh.add_worksheet(title="🚨 客訴與異常紀錄", rows="500", cols="12")
         ws_comp.append_row(COMPLAINT_HEADERS)
-        beautify_google_sheet(ws_comp, len(COMPLAINT_HEADERS))
-        need_init_sync = True
-    else:
-        ws_comp = sh.worksheet("🚨 客訴與異常紀錄")
-
-    if need_init_sync:
-        try:
-            ws_reports.hide()
-            ws_users.hide()
-        except:
-            pass
-
+        
     return ws_users, ws_reports, ws_compact, ws_comp
 
 @st.cache_data(ttl=120)
@@ -192,7 +150,7 @@ def load_users_df():
         except Exception as e:
             if attempt == 2:
                 raise e
-            time.sleep(2)
+            time.sleep(1.5)
 
 @st.cache_data(ttl=120)
 def load_reports_df():
@@ -203,7 +161,7 @@ def load_reports_df():
         except Exception as e:
             if attempt == 2:
                 raise e
-            time.sleep(2)
+            time.sleep(1.5)
 
 def clear_all_caches():
     load_users_df.clear()
@@ -359,13 +317,7 @@ if "submit_success_msg" not in st.session_state:
 if "confirm_del_id" not in st.session_state:
     st.session_state.confirm_del_id = None
 
-try:
-    ws_users, ws_reports, ws_compact, ws_comp = get_worksheets_cached()
-except Exception as e:
-    st.warning("⏳ 系統正在冷卻 Google 試算表連線頻率，請等待約 30 秒後按 F5 重新整理網頁即可恢復正常！")
-    st.stop()
-
-# ================= 4. 未登入畫面（登入 / 註冊 / 忘記密碼） =================
+# ================= 4. 未登入畫面（延遲連線：打開網頁瞬間 0 API 呼叫，保證秒開！） =================
 if not st.session_state.logged_in:
     st.title("✨ 黃金部門工作回報系統")
     tab1, tab2, tab3 = st.tabs(["🔑 登入系統", "📝 新人註冊", "❓ 忘記密碼"])
@@ -375,23 +327,24 @@ if not st.session_state.logged_in:
         login_user = st.text_input("帳號", key="l_user")
         login_pass = st.text_input("密碼", type="password", key="l_pass")
         if st.button("登入", type="primary"):
-            users_df = load_users_df()
-            if not users_df.empty and login_user in users_df["登入帳號"].values:
-                user_row = users_df[users_df["登入帳號"] == login_user].iloc[0]
-                if user_row["密碼雜湊"] == hash_password(login_pass):
-                    st.session_state.logged_in = True
-                    st.session_state.user_info = {
-                        "username": user_row["登入帳號"],
-                        "password_hash": user_row["密碼雜湊"],
-                        "name": user_row["真實姓名"],
-                        "email": user_row["綁定信箱"],
-                        "role": user_row["系統權限"]
-                    }
-                    st.rerun()
+            with st.spinner("🔄 正在驗證帳號..."):
+                users_df = load_users_df()
+                if not users_df.empty and login_user.strip() in users_df["登入帳號"].values:
+                    user_row = users_df[users_df["登入帳號"] == login_user.strip()].iloc[0]
+                    if user_row["密碼雜湊"] == hash_password(login_pass.strip()):
+                        st.session_state.logged_in = True
+                        st.session_state.user_info = {
+                            "username": user_row["登入帳號"],
+                            "password_hash": user_row["密碼雜湊"],
+                            "name": user_row["真實姓名"],
+                            "email": user_row["綁定信箱"],
+                            "role": user_row["系統權限"]
+                        }
+                        st.rerun()
+                    else:
+                        st.error("❌ 密碼錯誤！")
                 else:
-                    st.error("❌ 密碼錯誤！")
-            else:
-                st.error("❌ 找不到此帳號，請先註冊！")
+                    st.error("❌ 找不到此帳號，請先切換至「📝 新人註冊」建立帳號！")
 
     with tab2:
         st.subheader("註冊新帳號")
@@ -402,44 +355,54 @@ if not st.session_state.logged_in:
         reg_pass2 = st.text_input("再次確認密碼", type="password")
         
         if st.button("註冊帳號"):
-            if not all([reg_name, reg_email, reg_user, reg_pass1, reg_pass2]):
+            if not all([reg_name.strip(), reg_email.strip(), reg_user.strip(), reg_pass1.strip(), reg_pass2.strip()]):
                 st.warning("⚠️ 所有欄位皆為必填！")
             elif reg_pass1 != reg_pass2:
                 st.error("❌ 兩次輸入的密碼不一致，請重新確認！")
             else:
-                users_df = load_users_df()
-                if not users_df.empty and reg_user in users_df["登入帳號"].values:
-                    st.error("❌ 此帳號已被註冊，請換一個！")
-                else:
-                    ws_users.append_row([
-                        reg_user.strip(), hash_password(reg_pass1), reg_name.strip(), reg_email.strip(), "staff", get_tw_now().strftime("%Y-%m-%d %H:%M:%S")
-                    ])
-                    clear_all_caches()
-                    st.success("✅ 註冊成功！請切換至「登入系統」分頁進行登入。")
+                with st.spinner("🔄 正在建立您的帳號..."):
+                    ws_users, _, _, _ = get_worksheets_cached()
+                    users_df = load_users_df()
+                    if not users_df.empty and reg_user.strip() in users_df["登入帳號"].values:
+                        st.error("❌ 此帳號已被註冊，請換一個！")
+                    else:
+                        ws_users.append_row([
+                            reg_user.strip(), hash_password(reg_pass1.strip()), reg_name.strip(), reg_email.strip(), "staff", get_tw_now().strftime("%Y-%m-%d %H:%M:%S")
+                        ])
+                        clear_all_caches()
+                        st.success("✅ 註冊成功！請切換至左上角「🔑 登入系統」分頁進行登入。")
 
     with tab3:
         st.subheader("忘記密碼 / 重新寄送臨時密碼")
         fp_user = st.text_input("請輸入您的帳號")
         fp_email = st.text_input("請輸入註冊時綁定的信箱")
         if st.button("寄送重設密碼信"):
-            users_df = load_users_df()
-            if not users_df.empty:
-                match = users_df[(users_df["登入帳號"] == fp_user) & (users_df["綁定信箱"] == fp_email)]
-                if not match.empty:
-                    new_temp_pass = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-                    row_idx = find_user_row_idx(ws_users, fp_user)
-                    if row_idx:
-                        ws_users.update_cell(row_idx, 2, hash_password(new_temp_pass))
-                        clear_all_caches()
-                        if send_reset_email(fp_email, new_temp_pass):
-                            st.success("✅ 臨時新密碼已寄出！請至信箱收信並重新登入。")
+            with st.spinner("🔄 正在驗證信箱並發送郵件..."):
+                ws_users, _, _, _ = get_worksheets_cached()
+                users_df = load_users_df()
+                if not users_df.empty:
+                    match = users_df[(users_df["登入帳號"] == fp_user.strip()) & (users_df["綁定信箱"] == fp_email.strip())]
+                    if not match.empty:
+                        new_temp_pass = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+                        row_idx = find_user_row_idx(ws_users, fp_user.strip())
+                        if row_idx:
+                            ws_users.update_cell(row_idx, 2, hash_password(new_temp_pass))
+                            clear_all_caches()
+                            if send_reset_email(fp_email.strip(), new_temp_pass):
+                                st.success("✅ 臨時新密碼已寄出！請至信箱收信並重新登入。")
+                    else:
+                        st.error("❌ 帳號與綁定信箱不符合！")
                 else:
-                    st.error("❌ 帳號與綁定信箱不符合！")
-            else:
-                st.error("❌ 系統尚無使用者資料！")
+                    st.error("❌ 系統尚無使用者資料！")
 
 # ================= 5. 已登入畫面 =================
 else:
+    try:
+        ws_users, ws_reports, ws_compact, ws_comp = get_worksheets_cached()
+    except Exception as e:
+        st.warning("⏳ 系統正在冷卻連線頻率，請等待約 15 秒後按 F5 重新整理網頁即可恢復正常！")
+        st.stop()
+
     user = st.session_state.user_info
     st.sidebar.title(f"👋 您好，{user['name']}")
     st.sidebar.caption(f"身份：{'👑 管理員' if user['role'] == 'admin' else '👤 部門同仁'}")
@@ -609,50 +572,51 @@ else:
             elif not tasks_list:
                 st.error("❌ 請至少填寫一條「今日處理事項」！")
             else:
-                was_overwritten = delete_existing_same_day_report(ws_reports, user["username"], str(report_date))
-                
-                now_tw = get_tw_now()
-                report_id = now_tw.strftime("%Y%m%d%H%M%S") + "_" + user["username"]
-                ws_reports.append_row([
-                    report_id,
-                    now_tw.strftime("%Y-%m-%d %H:%M:%S"),
-                    str(report_date),
-                    user["username"],
-                    user["name"],
-                    work_start.strftime("%H:%M"),
-                    work_end.strftime("%H:%M"),
-                    pack_start_str,
-                    pack_end_str,
-                    pack_count,
-                    pack_duration,
-                    min_per_pack,
-                    cs_start_str,
-                    cs_end_str,
-                    cs_duration,
-                    ship_count,
-                    live_start_str,
-                    live_end_str,
-                    live_duration,
-                    has_complaint,
-                    c_who, c_where, c_when, c_what, c_why, c_how,
-                    "是" if has_8d else "否",
-                    file_8d_name,
-                    file_8d_b64,
-                    "\n".join(tasks_list),
-                    improvement_proposal,
-                    peer_feedback
-                ])
-                
-                sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
-                clear_all_caches()
-                
-                st.session_state.task_rows = 1
-                st.session_state.form_ver += 1
-                if was_overwritten:
-                    st.session_state.submit_success_msg = f"✅ 【覆蓋成功】您於 {report_date} 的舊回報已自動刪除，並更新為最新送出的內容（送出時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}）！下方表單已自動清空。"
-                else:
-                    st.session_state.submit_success_msg = f"🎉 【送出成功】您於 {report_date} 的工作回報已成功送出（送出時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}）！下方表單已自動清空。"
-                st.rerun()
+                with st.spinner("🚀 正在安全傳送您的回報資料..."):
+                    was_overwritten = delete_existing_same_day_report(ws_reports, user["username"], str(report_date))
+                    
+                    now_tw = get_tw_now()
+                    report_id = now_tw.strftime("%Y%m%d%H%M%S") + "_" + user["username"]
+                    ws_reports.append_row([
+                        report_id,
+                        now_tw.strftime("%Y-%m-%d %H:%M:%S"),
+                        str(report_date),
+                        user["username"],
+                        user["name"],
+                        work_start.strftime("%H:%M"),
+                        work_end.strftime("%H:%M"),
+                        pack_start_str,
+                        pack_end_str,
+                        pack_count,
+                        pack_duration,
+                        min_per_pack,
+                        cs_start_str,
+                        cs_end_str,
+                        cs_duration,
+                        ship_count,
+                        live_start_str,
+                        live_end_str,
+                        live_duration,
+                        has_complaint,
+                        c_who, c_where, c_when, c_what, c_why, c_how,
+                        "是" if has_8d else "否",
+                        file_8d_name,
+                        file_8d_b64,
+                        "\n".join(tasks_list),
+                        improvement_proposal,
+                        peer_feedback
+                    ])
+                    
+                    sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
+                    clear_all_caches()
+                    
+                    st.session_state.task_rows = 1
+                    st.session_state.form_ver += 1
+                    if was_overwritten:
+                        st.session_state.submit_success_msg = f"✅ 【覆蓋成功】您於 {report_date} 的舊回報已自動刪除，並更新為最新送出的內容（送出時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}）！下方表單已自動清空。"
+                    else:
+                        st.session_state.submit_success_msg = f"🎉 【送出成功】您於 {report_date} 的工作回報已成功送出（送出時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}）！下方表單已自動清空。"
+                    st.rerun()
 
         # 同仁自行撤回近期回報紀錄（含二次確認防呆機制）
         st.divider()
