@@ -51,6 +51,22 @@ COMPLAINT_HEADERS = [
     "6.解決與改善(How)", "有無附8D報告", "8D檔案名稱", "回報單號"
 ]
 
+# 英中欄位自動對應字典（防止舊版試算表標題對不上導致修改無效）
+EN_TO_ZH_MAP = {
+    "report_id": "回報單號", "submit_time": "送出時間", "report_date": "回報日期",
+    "username": "帳號", "name": "姓名", "work_start": "上班時間", "work_end": "下班時間",
+    "pack_start": "包貨開始", "pack_end": "包貨結束", "pack_count": "包貨件數",
+    "pack_duration_min": "包貨總分鐘", "min_per_pack": "單件包貨耗時(分)",
+    "cs_start": "客服開始", "cs_end": "客服結束", "cs_duration_min": "客服總分鐘",
+    "ship_count": "寄貨件數", "live_start": "直播開始", "live_end": "直播結束",
+    "live_duration_min": "直播總分鐘", "has_complaint": "有無客訴",
+    "c_who": "客訴_Who", "c_where": "客訴_Where", "c_when": "客訴_When",
+    "c_what": "客訴_What", "c_why": "客訴_Why", "c_how": "客訴_How",
+    "has_8d": "有無8D", "file_8d_name": "8D檔名", "file_8d_b64": "8D檔案編碼",
+    "daily_tasks": "今日處理事項", "improvement_proposal": "提案改善", "peer_feedback": "對同仁想法",
+    "username_u": "登入帳號", "password_hash": "密碼雜湊", "email": "綁定信箱", "role": "系統權限", "created_at": "建立時間"
+}
+
 # ================= 1. 輔助與安全函數 =================
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
@@ -58,6 +74,13 @@ def hash_password(password):
 def make_auth_token(username, pass_hash):
     raw = f"{username}_{pass_hash}_gold_stay_logged_in"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+def col_num_to_letter(n):
+    string = ""
+    while n > 0:
+        n, remainder = divmod(n - 1, 26)
+        string = chr(65 + remainder) + string
+    return string
 
 def calc_minutes(t_start, t_end):
     dt1 = datetime.datetime.combine(get_tw_today(), t_start)
@@ -68,10 +91,10 @@ def calc_minutes(t_start, t_end):
 
 def calc_minutes_str(s1, s2):
     try:
-        if not s1 or not s2 or s1 == "無" or s2 == "無" or (s1 == "00:00" and s2 == "00:00"):
+        if not s1 or not s2 or str(s1).strip() in ["無", ""] or str(s2).strip() in ["無", ""] or (str(s1).strip() == "00:00" and str(s2).strip() == "00:00"):
             return 0
-        t1 = datetime.datetime.strptime(s1.strip(), "%H:%M").time()
-        t2 = datetime.datetime.strptime(s2.strip(), "%H:%M").time()
+        t1 = datetime.datetime.strptime(str(s1).strip(), "%H:%M").time()
+        t2 = datetime.datetime.strptime(str(s2).strip(), "%H:%M").time()
         return calc_minutes(t1, t2)
     except:
         return 0
@@ -86,16 +109,23 @@ def parse_time_safe(t_str, default_time=datetime.time(9, 0)):
 
 def parse_date_safe(d_str):
     try:
-        return datetime.datetime.strptime(str(d_str).strip(), "%Y-%m-%d").date()
+        return pd.to_datetime(str(d_str).strip()).date()
     except:
         return get_tw_today()
+
+def normalize_date_str(d_str):
+    """將任何格式的日期字串統一轉為 YYYY-MM-DD，確保折線圖橫軸排序永遠正確"""
+    try:
+        return pd.to_datetime(str(d_str).strip()).strftime("%Y-%m-%d")
+    except:
+        return str(d_str).strip()
 
 def parse_vals_to_df(all_vals):
     if not all_vals or len(all_vals) <= 1:
         return pd.DataFrame()
-    headers = [h.strip() for h in all_vals[0]]
+    raw_headers = [EN_TO_ZH_MAP.get(h.strip(), h.strip()) for h in all_vals[0]]
     valid_cols, clean_headers, seen = [], [], set()
-    for i, h in enumerate(headers):
+    for i, h in enumerate(raw_headers):
         if h != "" and h not in seen:
             valid_cols.append(i)
             clean_headers.append(h)
@@ -104,15 +134,18 @@ def parse_vals_to_df(all_vals):
     for r in all_vals[1:]:
         if not any(str(cell).strip() for cell in r):
             continue
-        row_padded = r + [""] * max(0, len(headers) - len(r))
+        row_padded = r + [""] * max(0, len(raw_headers) - len(r))
         data.append([row_padded[i] for i in valid_cols])
-    return pd.DataFrame(data, columns=clean_headers)
+    df = pd.DataFrame(data, columns=clean_headers)
+    if "回報日期" in df.columns:
+        df["回報日期"] = df["回報日期"].apply(normalize_date_str)
+    return df
 
 # ================= 2. 極速資料庫連線與快取機制 =================
 def beautify_google_sheet(ws, num_cols):
     try:
         ws.freeze(rows=1)
-        end_col = chr(64 + min(num_cols, 26))
+        end_col = col_num_to_letter(min(num_cols, 26))
         ws.format(f"A1:{end_col}1", {
             "backgroundColor": {"red": 0.12, "green": 0.31, "blue": 0.47},
             "textFormat": {"foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}, "bold": True, "fontSize": 11},
@@ -161,7 +194,10 @@ def load_users_df():
     ws_users, _, _, _ = get_worksheets_cached()
     for attempt in range(3):
         try:
-            return parse_vals_to_df(ws_users.get_all_values())
+            df = parse_vals_to_df(ws_users.get_all_values())
+            if "帳號" in df.columns and "登入帳號" not in df.columns:
+                df.rename(columns={"帳號": "登入帳號", "姓名": "真實姓名"}, inplace=True)
+            return df
         except Exception as e:
             if attempt == 2:
                 raise e
@@ -182,6 +218,36 @@ def clear_all_caches():
     load_users_df.clear()
     load_reports_df.clear()
 
+def write_report_dict_to_sheet(ws_reports, data_dict, target_report_id=None):
+    """智慧欄位對位寫入：根據試算表當前的標題列順序精準寫入，徹底解決新舊欄位錯位問題"""
+    all_vals = ws_reports.get_all_values()
+    if not all_vals:
+        ws_reports.append_row(REPORT_HEADERS)
+        headers = REPORT_HEADERS
+    else:
+        headers = [EN_TO_ZH_MAP.get(h.strip(), h.strip()) for h in all_vals[0]]
+        # 若試算表標題還是舊版 30 欄，自動在尾端補齊缺少的欄位標題
+        missing_cols = [h for h in REPORT_HEADERS if h not in headers]
+        if missing_cols:
+            headers = headers + missing_cols
+            end_col_let = col_num_to_letter(len(headers))
+            ws_reports.update(raw=False, range_name=f"A1:{end_col_let}1", values=[headers])
+
+    row_to_write = [data_dict.get(h, "") for h in headers]
+
+    if target_report_id is not None:
+        # 尋找單號所在列並精準覆蓋
+        for idx in range(1, len(all_vals)):
+            if len(all_vals[idx]) > 0 and str(all_vals[idx][0]).strip() == str(target_report_id).strip():
+                row_num = idx + 1
+                end_col_let = col_num_to_letter(len(headers))
+                ws_reports.update(raw=False, range_name=f"A{row_num}:{end_col_let}{row_num}", values=[row_to_write])
+                return True
+        return False
+    else:
+        ws_reports.append_row(row_to_write)
+        return True
+
 def sync_pretty_sheets(ws_reports, ws_compact, ws_comp, apply_style=False):
     all_vals = ws_reports.get_all_values()
     df = parse_vals_to_df(all_vals)
@@ -192,10 +258,19 @@ def sync_pretty_sheets(ws_reports, ws_compact, ws_comp, apply_style=False):
         df_sorted = df.sort_values(by=["回報日期", "送出時間"], ascending=[False, False])
         for _, r in df_sorted.iterrows():
             p_cnt = pd.to_numeric(r.get("包貨件數", 0), errors="coerce") or 0
-            cs_min = pd.to_numeric(r.get("客服總分鐘", 0), errors="coerce") or 0
-            lv_min = pd.to_numeric(r.get("直播總分鐘", 0), errors="coerce") or 0
+            p_dur = pd.to_numeric(r.get("包貨總分鐘", 0), errors="coerce") or 0
+            if p_dur <= 0 and p_cnt > 0:
+                p_dur = calc_minutes_str(r.get("包貨開始", "無"), r.get("包貨結束", "無"))
+            m_per_p = round(p_dur / p_cnt, 2) if p_cnt > 0 else 0
             
-            pack_str = f"{r.get('包貨開始','無')}~{r.get('包貨結束','無')}\n({int(p_cnt)}件 / {r.get('單件包貨耗時(分)',0)}分)" if p_cnt > 0 else "無"
+            cs_min = pd.to_numeric(r.get("客服總分鐘", 0), errors="coerce") or 0
+            if cs_min <= 0:
+                cs_min = calc_minutes_str(r.get("客服開始", "無"), r.get("客服結束", "無"))
+            lv_min = pd.to_numeric(r.get("直播總分鐘", 0), errors="coerce") or 0
+            if lv_min <= 0:
+                lv_min = calc_minutes_str(r.get("直播開始", "無"), r.get("直播結束", "無"))
+            
+            pack_str = f"{r.get('包貨開始','無')}~{r.get('包貨結束','無')}\n({int(p_cnt)}件 / {m_per_p}分)" if p_cnt > 0 else "無"
             cs_str = f"{r.get('客服開始','無')}~{r.get('客服結束','無')}\n({round(cs_min/60, 1)}小時)" if cs_min > 0 else "無"
             lv_str = f"{r.get('直播開始','無')}~{r.get('直播結束','無')}\n({round(lv_min/60, 1)}小時)" if lv_min > 0 else "無"
             
@@ -245,18 +320,6 @@ def find_user_row_idx(ws_users, target_username):
             return idx + 1
     return None
 
-def update_report_by_id(ws_reports, ws_compact, ws_comp, target_report_id, new_row_values):
-    """根據回報單號找到對應列，直接更新整列資料並同步美化分頁"""
-    col_vals = ws_reports.col_values(1)
-    for idx, val in enumerate(col_vals):
-        if idx > 0 and str(val).strip() == str(target_report_id).strip():
-            row_num = idx + 1
-            ws_reports.update(f"A{row_num}:AF{row_num}", [new_row_values])
-            sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
-            clear_all_caches()
-            return True
-    return False
-
 def delete_report_by_id(ws_reports, ws_compact, ws_comp, target_report_id):
     col_vals = ws_reports.col_values(1)
     deleted = False
@@ -272,9 +335,10 @@ def delete_report_by_id(ws_reports, ws_compact, ws_comp, target_report_id):
 def delete_existing_same_day_report(ws_reports, username, report_date_str):
     all_vals = ws_reports.get_all_values()
     overwritten = False
+    target_d = normalize_date_str(report_date_str)
     for idx in range(len(all_vals) - 1, 0, -1):
         r = all_vals[idx]
-        if len(r) >= 4 and str(r[2]).strip() == str(report_date_str).strip() and str(r[3]).strip() == str(username).strip():
+        if len(r) >= 4 and normalize_date_str(r[2]) == target_d and str(r[3]).strip() == str(username).strip():
             ws_reports.delete_rows(idx + 1)
             overwritten = True
     return overwritten
@@ -346,7 +410,6 @@ if "confirm_del_id" not in st.session_state:
 if "edit_report_id" not in st.session_state:
     st.session_state.edit_report_id = None
 
-# 【防掉線機制】：若網頁重整，自動從網址安全憑證恢復登入
 if not st.session_state.logged_in:
     saved_u = st.query_params.get("u", "")
     saved_t = st.query_params.get("t", "")
@@ -644,52 +707,56 @@ else:
                     live_end_str = live_end.strftime("%H:%M") if has_live else "無"
                     live_duration = calc_minutes(live_start, live_end) if has_live else 0
 
-                    was_overwritten = delete_existing_same_day_report(ws_reports, user["username"], str(report_date))
+                    clean_rdate = normalize_date_str(report_date)
+                    was_overwritten = delete_existing_same_day_report(ws_reports, user["username"], clean_rdate)
                     
                     now_tw = get_tw_now()
                     report_id = now_tw.strftime("%Y%m%d%H%M%S") + "_" + user["username"]
-                    ws_reports.append_row([
-                        report_id,
-                        now_tw.strftime("%Y-%m-%d %H:%M:%S"),
-                        str(report_date),
-                        user["username"],
-                        user["name"],
-                        work_start.strftime("%H:%M"),
-                        work_end.strftime("%H:%M"),
-                        pack_start_str,
-                        pack_end_str,
-                        pack_count if has_pack else 0,
-                        pack_duration,
-                        min_per_pack,
-                        cs_start_str,
-                        cs_end_str,
-                        cs_duration,
-                        ship_count if has_ship else 0,
-                        live_start_str,
-                        live_end_str,
-                        live_duration,
-                        has_complaint,
-                        c_who, c_where, c_when, c_what, c_why, c_how,
-                        "是" if has_8d else "否",
-                        file_8d_name,
-                        file_8d_b64,
-                        "\n".join(tasks_list),
-                        improvement_proposal,
-                        peer_feedback
-                    ])
                     
+                    new_data_dict = {
+                        "回報單號": report_id,
+                        "送出時間": now_tw.strftime("%Y-%m-%d %H:%M:%S"),
+                        "回報日期": clean_rdate,
+                        "帳號": user["username"],
+                        "姓名": user["name"],
+                        "上班時間": work_start.strftime("%H:%M"),
+                        "下班時間": work_end.strftime("%H:%M"),
+                        "包貨開始": pack_start_str,
+                        "包貨結束": pack_end_str,
+                        "包貨件數": pack_count if has_pack else 0,
+                        "包貨總分鐘": pack_duration,
+                        "單件包貨耗時(分)": min_per_pack,
+                        "客服開始": cs_start_str,
+                        "客服結束": cs_end_str,
+                        "客服總分鐘": cs_duration,
+                        "寄貨件數": ship_count if has_ship else 0,
+                        "直播開始": live_start_str,
+                        "直播結束": live_end_str,
+                        "直播總分鐘": live_duration,
+                        "有無客訴": has_complaint,
+                        "客訴_Who": c_who, "客訴_Where": c_where, "客訴_When": c_when,
+                        "客訴_What": c_what, "客訴_Why": c_why, "客訴_How": c_how,
+                        "有無8D": "是" if has_8d else "否",
+                        "8D檔名": file_8d_name,
+                        "8D檔案編碼": file_8d_b64,
+                        "今日處理事項": "\n".join(tasks_list),
+                        "提案改善": improvement_proposal,
+                        "對同仁想法": peer_feedback
+                    }
+                    
+                    write_report_dict_to_sheet(ws_reports, new_data_dict, target_report_id=None)
                     sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
                     clear_all_caches()
                     
                     st.session_state.task_rows = 3
                     st.session_state.form_ver += 1
                     if was_overwritten:
-                        st.session_state.submit_success_msg = f"✅ 【覆蓋成功】您於 {report_date} 的舊回報已自動刪除，並更新為最新送出的內容（送出時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}）！下方表單已自動清空。"
+                        st.session_state.submit_success_msg = f"✅ 【覆蓋成功】您於 {clean_rdate} 的舊回報已自動刪除，並更新為最新送出的內容（送出時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}）！下方表單已自動清空。"
                     else:
-                        st.session_state.submit_success_msg = f"🎉 【送出成功】您於 {report_date} 的工作回報已成功送出（送出時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}）！下方表單已自動清空。"
+                        st.session_state.submit_success_msg = f"🎉 【送出成功】您於 {clean_rdate} 的工作回報已成功送出（送出時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}）！下方表單已自動清空。"
                     st.rerun()
 
-        # 同仁自行撤回近期回報紀錄（含二次確認防呆機制）
+        # 同仁自行撤回近期回報紀錄
         st.divider()
         with st.expander("🗂️ 檢視 / 撤回我近期已送出的回報紀錄"):
             df_check = load_reports_df()
@@ -851,7 +918,14 @@ else:
 
     # ---------------- 功能 D：主管後台數據中心 ----------------
     elif choice == "📊 主管後台數據中心" and user["role"] == "admin":
-        st.title("📊 黃金部門 - 主管後台數據中心")
+        top_c1, top_c2 = st.columns([3.5, 1.2])
+        with top_c1:
+            st.title("📊 黃金部門 - 主管後台數據中心")
+        with top_c2:
+            st.write("")
+            if st.button("🔄 立即刷新最新數據與圖表", use_container_width=True):
+                clear_all_caches()
+                st.rerun()
         
         df = load_reports_df()
         if df.empty:
@@ -862,11 +936,18 @@ else:
                     df[col] = 0
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
                 
+            # 【關鍵即時重算機制】：每次載入都根據最新的起訖時間與件數強制校準分鐘數與單件效率，確保修改後折線圖 100% 同步！
+            df["包貨總分鐘"] = df.apply(
+                lambda r: calc_minutes_str(r.get("包貨開始", "無"), r.get("包貨結束", "無")) if calc_minutes_str(r.get("包貨開始", "無"), r.get("包貨結束", "無")) > 0 else r["包貨總分鐘"], axis=1
+            )
+            df["單件包貨耗時(分)"] = df.apply(
+                lambda r: round(r["包貨總分鐘"] / r["包貨件數"], 2) if r["包貨件數"] > 0 else 0, axis=1
+            )
             df["客服總分鐘"] = df.apply(
-                lambda r: r["客服總分鐘"] if r["客服總分鐘"] > 0 else calc_minutes_str(r.get("客服開始", "無"), r.get("客服結束", "無")), axis=1
+                lambda r: calc_minutes_str(r.get("客服開始", "無"), r.get("客服結束", "無")) if calc_minutes_str(r.get("客服開始", "無"), r.get("客服結束", "無")) > 0 else r["客服總分鐘"], axis=1
             )
             df["直播總分鐘"] = df.apply(
-                lambda r: r["直播總分鐘"] if r["直播總分鐘"] > 0 else calc_minutes_str(r.get("直播開始", "無"), r.get("直播結束", "無")), axis=1
+                lambda r: calc_minutes_str(r.get("直播開始", "無"), r.get("直播結束", "無")) if calc_minutes_str(r.get("直播開始", "無"), r.get("直播結束", "無")) > 0 else r["直播總分鐘"], axis=1
             )
             
             df["月份"] = df["回報日期"].astype(str).str.slice(0, 7)
@@ -949,7 +1030,10 @@ else:
                     daily_grouped["單件包貨耗時(分/件)"] = (
                         daily_grouped["當日包貨總分鐘"] / daily_grouped["當日包貨件數"]
                     ).round(2)
-                    daily_grouped = daily_grouped.sort_values("回報日期")
+                    
+                    # 嚴格依據日期先後排序，鎖定橫軸順序，解決不同人不同天導致橫軸日期亂跳的問題
+                    sorted_all_dates = sorted(daily_grouped["回報日期"].unique().tolist())
+                    daily_grouped = daily_grouped.sort_values(["回報日期", "姓名"])
 
                     st.markdown("#### 👥 各同仁包貨效率比較折線圖")
                     fig_compare = px.line(
@@ -960,13 +1044,14 @@ else:
                         markers=True,
                         text="單件包貨耗時(分/件)",
                         hover_data=["當日包貨件數", "當日包貨總分鐘"],
+                        category_orders={"回報日期": sorted_all_dates},
                         labels={
                             "回報日期": "日期 (天)",
                             "單件包貨耗時(分/件)": "效率：單件包貨耗時 (分/件)"
                         }
                     )
-                    fig_compare.update_xaxes(type="category")
-                    fig_compare.update_traces(textposition="top center")
+                    fig_compare.update_xaxes(type="category", categoryorder="array", categoryarray=sorted_all_dates)
+                    fig_compare.update_traces(textposition="top center", connectgaps=True, marker=dict(size=9))
                     st.plotly_chart(fig_compare, use_container_width=True)
 
                     st.markdown("#### 👤 單獨同仁包貨效率折線圖")
@@ -985,7 +1070,8 @@ else:
                             for j in range(cols_per_row):
                                 if i + j < len(staff_list):
                                     st_name = staff_list[i + j]
-                                    single_df = daily_grouped[daily_grouped["姓名"] == st_name]
+                                    single_df = daily_grouped[daily_grouped["姓名"] == st_name].sort_values("回報日期")
+                                    s_dates = sorted(single_df["回報日期"].unique().tolist())
                                     fig_single = px.line(
                                         single_df,
                                         x="回報日期",
@@ -993,17 +1079,19 @@ else:
                                         markers=True,
                                         text="單件包貨耗時(分/件)",
                                         hover_data=["當日包貨件數", "當日包貨總分鐘"],
+                                        category_orders={"回報日期": s_dates},
                                         title=f"👤 {st_name} - 個人每日包貨效率折線圖",
                                         labels={
                                             "回報日期": "日期 (天)",
                                             "單件包貨耗時(分/件)": "效率：單件耗時 (分/件)"
                                         }
                                     )
-                                    fig_single.update_xaxes(type="category")
-                                    fig_single.update_traces(line_color="#00B4D8", textposition="top center")
+                                    fig_single.update_xaxes(type="category", categoryorder="array", categoryarray=s_dates)
+                                    fig_single.update_traces(line_color="#00B4D8", textposition="top center", marker=dict(size=9))
                                     c_list[j].plotly_chart(fig_single, use_container_width=True)
                     else:
-                        single_df = daily_grouped[daily_grouped["姓名"] == target_staff]
+                        single_df = daily_grouped[daily_grouped["姓名"] == target_staff].sort_values("回報日期")
+                        s_dates = sorted(single_df["回報日期"].unique().tolist())
                         fig_single = px.line(
                             single_df,
                             x="回報日期",
@@ -1011,14 +1099,15 @@ else:
                             markers=True,
                             text="單件包貨耗時(分/件)",
                             hover_data=["當日包貨件數", "當日包貨總分鐘"],
+                            category_orders={"回報日期": s_dates},
                             title=f"👤 {target_staff} - 個人每日包貨效率折線圖",
                             labels={
                                 "回報日期": "日期 (天)",
                                 "單件包貨耗時(分/件)": "效率：單件耗時 (分/件)"
                             }
                         )
-                        fig_single.update_xaxes(type="category")
-                        fig_single.update_traces(line_color="#00B4D8", textposition="top center")
+                        fig_single.update_xaxes(type="category", categoryorder="array", categoryarray=s_dates)
+                        fig_single.update_traces(line_color="#00B4D8", textposition="top center", marker=dict(size=9))
                         st.plotly_chart(fig_single, use_container_width=True)
                 else:
                     st.caption("目前篩選區間內尚無包貨數據可繪製效率折線圖。")
@@ -1137,7 +1226,7 @@ else:
                     r_id = row.get("回報單號", f"idx_{idx}")
                     alert_badge = " 🚨【有客訴】" if row.get("有無客訴") == "有" else ""
                     badge_8d = " 📎【附8D報告】" if row.get("有無8D") == "是" else ""
-                    exp_title = f"📅 {row.get('回報日期', '')} ｜ 👤 {row.get('姓名', '')} ｜ 🕒 上下班：{row.get('上班時間', '')}~{row.get('下班時間', '')} ｜ 📦 包貨：{int(row.get('包貨件數', 0))}件 / 🚚 寄貨：{int(row.get('寄貨件數', 0))}件{alert_badge}{badge_8d}"
+                    exp_title = f"📅 {row.get('回報日期', '')} ｜ 👤 {row.get('姓名', '')} ｜ 🕒 上下班：{row.get('上班時間', '')}~{row.get('下班時間', '')} ｜ 📦 包貨：{int(row.get('包貨件數', 0))}件 ({row.get('單件包貨耗時(分)', 0)}分/件) / 🚚 寄貨：{int(row.get('寄貨件數', 0))}件{alert_badge}{badge_8d}"
                     
                     is_editing_this = (st.session_state.edit_report_id == r_id)
                     with st.expander(exp_title, expanded=(idx == 0 or is_editing_this)):
@@ -1203,7 +1292,6 @@ else:
                         foot_c1, foot_c2, foot_c3 = st.columns([2.5, 1.2, 1.3])
                         foot_c1.caption(f"系統回報單號：{r_id} ｜ 實際送出時間 (台灣時間)：{row.get('送出時間', '')}")
                         
-                        # 修改按鈕
                         with foot_c2:
                             if is_editing_this:
                                 if st.button("❌ 收合修改面板", key=f"close_edit_{r_id}", use_container_width=True):
@@ -1215,7 +1303,6 @@ else:
                                     st.session_state.confirm_del_id = None
                                     st.rerun()
 
-                        # 刪除按鈕（含二次確認）
                         with foot_c3:
                             if st.session_state.confirm_del_id == f"adm_{r_id}":
                                 st.warning(f"⚠️ 確定要永久刪除嗎？")
@@ -1237,7 +1324,7 @@ else:
                         # ================= 管理員專屬：單筆回報內容原地修改面板 =================
                         if is_editing_this:
                             st.markdown("---")
-                            st.info(f"🛠️ **正在修改【{row.get('姓名', '')} - {row.get('回報日期', '')}】的回報內容**（修改後系統將自動重新計算包貨效率、客服與直播時數）")
+                            st.info(f"🛠️ **正在修改【{row.get('姓名', '')} - {row.get('回報日期', '')}】的回報內容**（只要包貨件數大於 0，儲存後系統就會強制重新計算單件包貨耗時，並立即更新上方折線圖！）")
                             with st.form(key=f"edit_form_{r_id}"):
                                 e_col1, e_col2, e_col3, e_col4 = st.columns(4)
                                 with e_col1:
@@ -1249,24 +1336,21 @@ else:
                                 with e_col4:
                                     e_we = st.time_input("🕕 下班時間", parse_time_safe(row.get("下班時間", "18:00"), datetime.time(18, 0)), step=60)
 
-                                st.markdown("##### 📦 包貨與 🚚 寄貨修正")
-                                ep1, ep2, ep3, ep4, ep5 = st.columns([1.2, 1.2, 1.2, 1.2, 1.2])
-                                orig_has_pack = int(row.get("包貨件數", 0)) > 0 and str(row.get("包貨開始", "無")) != "無"
+                                st.markdown("##### 📦 包貨與 🚚 寄貨修正（若無包貨，將『包貨件數』設為 0 即可）")
+                                ep1, ep2, ep3, ep4 = st.columns(4)
                                 with ep1:
-                                    e_has_pack = st.checkbox("📦 當日有包貨", value=orig_has_pack)
+                                    e_ps = st.time_input("📦 包貨開始時間", parse_time_safe(row.get("包貨開始", "10:00"), datetime.time(10, 0)), step=60)
                                 with ep2:
-                                    e_ps = st.time_input("包貨開始", parse_time_safe(row.get("包貨開始", "10:00"), datetime.time(10, 0)), step=60)
+                                    e_pe = st.time_input("📦 包貨結束時間", parse_time_safe(row.get("包貨結束", "12:00"), datetime.time(12, 0)), step=60)
                                 with ep3:
-                                    e_pe = st.time_input("包貨結束", parse_time_safe(row.get("包貨結束", "12:00"), datetime.time(12, 0)), step=60)
+                                    e_pc = st.number_input("📦 包貨件數 (大於0即自動算效率)", min_value=0, value=int(row.get("包貨件數", 0)), step=1)
                                 with ep4:
-                                    e_pc = st.number_input("包貨件數 (無則填0)", min_value=0, value=int(row.get("包貨件數", 0)), step=1)
-                                with ep5:
                                     e_sc = st.number_input("🚚 寄貨件數", min_value=0, value=int(row.get("寄貨件數", 0)), step=1)
 
                                 st.markdown("##### 💬 客服與 🎥 直播時段修正")
                                 ec1, ec2, ec3, ec4, ec5, ec6 = st.columns(6)
-                                orig_has_cs = str(row.get("客服開始", "無")) != "無"
-                                orig_has_lv = str(row.get("直播開始", "無")) != "無"
+                                orig_has_cs = str(row.get("客服開始", "無")) not in ["無", ""]
+                                orig_has_lv = str(row.get("直播開始", "無")) not in ["無", ""]
                                 with ec1:
                                     e_has_cs = st.checkbox("💬 當日有客服", value=orig_has_cs)
                                 with ec2:
@@ -1310,12 +1394,12 @@ else:
                                 e_has_8d = st.checkbox("📄 附有 8D 報告", value=(row.get("有無8D") == "是"))
                                 e_new_8d_file = st.file_uploader("若要替換或補傳 8D 檔案請在此上傳 (不傳則保留原檔案)", type=["xlsx", "xls", "docx", "doc", "pdf"])
 
-                                save_edit_btn = st.form_submit_button("💾 儲存所有修改內容", type="primary", use_container_width=True)
+                                save_edit_btn = st.form_submit_button("💾 儲存所有修改內容 (立即更新圖表與統計)", type="primary", use_container_width=True)
 
                             if save_edit_btn:
-                                with st.spinner("🔄 正在更新回報資料並重新計算統計指標..."):
-                                    # 重新計算包貨數據
-                                    if e_has_pack and e_pc > 0:
+                                with st.spinner("🔄 正在更新回報資料並重新計算統計指標與折線圖..."):
+                                    # 只要包貨件數 > 0，無條件根據包貨起訖時間重新計算總分鐘數與單件耗時！
+                                    if e_pc > 0:
                                         new_ps_str = e_ps.strftime("%H:%M")
                                         new_pe_str = e_pe.strftime("%H:%M")
                                         new_p_dur = calc_minutes(e_ps, e_pe)
@@ -1341,7 +1425,6 @@ else:
                                     else:
                                         new_lvs_str, new_lve_str, new_lv_dur = "無", "無", 0
 
-                                    # 處理 8D 檔案
                                     final_8d_flag = "是" if e_has_8d else "否"
                                     final_8d_name = str(row.get("8D檔名", "")) if e_has_8d else ""
                                     final_8d_b64 = str(row.get("8D檔案編碼", "")) if e_has_8d else ""
@@ -1349,44 +1432,47 @@ else:
                                         final_8d_name = e_new_8d_file.name
                                         final_8d_b64 = base64.b64encode(e_new_8d_file.read()).decode("utf-8")
 
-                                    updated_row = [
-                                        r_id,
-                                        str(row.get("送出時間", "")),
-                                        str(e_date),
-                                        str(row.get("帳號", "")),
-                                        e_name.strip(),
-                                        e_ws.strftime("%H:%M"),
-                                        e_we.strftime("%H:%M"),
-                                        new_ps_str,
-                                        new_pe_str,
-                                        new_pc_val,
-                                        new_p_dur,
-                                        new_min_per_p,
-                                        new_css_str,
-                                        new_cse_str,
-                                        new_cs_dur,
-                                        e_sc,
-                                        new_lvs_str,
-                                        new_lve_str,
-                                        new_lv_dur,
-                                        e_has_comp,
-                                        e_cwho.strip() if e_has_comp == "有" else "",
-                                        e_cwhere if e_has_comp == "有" else "",
-                                        e_cwhen.strip() if e_has_comp == "有" else "",
-                                        e_cwhat.strip() if e_has_comp == "有" else "",
-                                        e_cwhy.strip() if e_has_comp == "有" else "",
-                                        e_chow.strip() if e_has_comp == "有" else "",
-                                        final_8d_flag,
-                                        final_8d_name,
-                                        final_8d_b64,
-                                        e_tasks.strip(),
-                                        e_prop.strip(),
-                                        e_peer.strip()
-                                    ]
+                                    clean_edate = normalize_date_str(e_date)
+                                    updated_dict = {
+                                        "回報單號": r_id,
+                                        "送出時間": str(row.get("送出時間", "")),
+                                        "回報日期": clean_edate,
+                                        "帳號": str(row.get("帳號", "")),
+                                        "姓名": e_name.strip(),
+                                        "上班時間": e_ws.strftime("%H:%M"),
+                                        "下班時間": e_we.strftime("%H:%M"),
+                                        "包貨開始": new_ps_str,
+                                        "包貨結束": new_pe_str,
+                                        "包貨件數": new_pc_val,
+                                        "包貨總分鐘": new_p_dur,
+                                        "單件包貨耗時(分)": new_min_per_p,
+                                        "客服開始": new_css_str,
+                                        "客服結束": new_cse_str,
+                                        "客服總分鐘": new_cs_dur,
+                                        "寄貨件數": e_sc,
+                                        "直播開始": new_lvs_str,
+                                        "直播結束": new_lve_str,
+                                        "直播總分鐘": new_lv_dur,
+                                        "有無客訴": e_has_comp,
+                                        "客訴_Who": e_cwho.strip() if e_has_comp == "有" else "",
+                                        "客訴_Where": e_cwhere if e_has_comp == "有" else "",
+                                        "客訴_When": e_cwhen.strip() if e_has_comp == "有" else "",
+                                        "客訴_What": e_cwhat.strip() if e_has_comp == "有" else "",
+                                        "客訴_Why": e_cwhy.strip() if e_has_comp == "有" else "",
+                                        "客訴_How": e_chow.strip() if e_has_comp == "有" else "",
+                                        "有無8D": final_8d_flag,
+                                        "8D檔名": final_8d_name,
+                                        "8D檔案編碼": final_8d_b64,
+                                        "今日處理事項": e_tasks.strip(),
+                                        "提案改善": e_prop.strip(),
+                                        "對同仁想法": e_peer.strip()
+                                    }
 
-                                    if update_report_by_id(ws_reports, ws_compact, ws_comp, r_id, updated_row):
+                                    if write_report_dict_to_sheet(ws_reports, updated_dict, target_report_id=r_id):
+                                        sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
+                                        clear_all_caches()
                                         st.session_state.edit_report_id = None
-                                        st.success(f"✅ 已成功修改並更新 **{e_name} ({e_date})** 的回報內容！")
+                                        st.success(f"✅ 已成功修改 **{e_name} ({clean_edate})** 的回報內容！最新單件包貨耗時已更新為：**{new_min_per_p} 分/件**！")
                                         st.rerun()
                                     else:
                                         st.error("❌ 找不到該筆單號，無法更新，請重新整理網頁後再試。")
