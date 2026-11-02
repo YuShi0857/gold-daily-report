@@ -51,12 +51,11 @@ COMPLAINT_HEADERS = [
     "6.解決與改善(How)", "有無附8D報告", "8D檔案名稱", "回報單號"
 ]
 
-# ================= 1. 輔助與安全函數 (含防掉線 Token 驗證) =================
+# ================= 1. 輔助與安全函數 =================
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 def make_auth_token(username, pass_hash):
-    """產生專屬防掉線安全憑證，讓網頁就算重整也不會踢出登入"""
     raw = f"{username}_{pass_hash}_gold_stay_logged_in"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
@@ -76,6 +75,20 @@ def calc_minutes_str(s1, s2):
         return calc_minutes(t1, t2)
     except:
         return 0
+
+def parse_time_safe(t_str, default_time=datetime.time(9, 0)):
+    try:
+        if not t_str or str(t_str).strip() in ["無", ""]:
+            return default_time
+        return datetime.datetime.strptime(str(t_str).strip(), "%H:%M").time()
+    except:
+        return default_time
+
+def parse_date_safe(d_str):
+    try:
+        return datetime.datetime.strptime(str(d_str).strip(), "%Y-%m-%d").date()
+    except:
+        return get_tw_today()
 
 def parse_vals_to_df(all_vals):
     if not all_vals or len(all_vals) <= 1:
@@ -232,6 +245,18 @@ def find_user_row_idx(ws_users, target_username):
             return idx + 1
     return None
 
+def update_report_by_id(ws_reports, ws_compact, ws_comp, target_report_id, new_row_values):
+    """根據回報單號找到對應列，直接更新整列資料並同步美化分頁"""
+    col_vals = ws_reports.col_values(1)
+    for idx, val in enumerate(col_vals):
+        if idx > 0 and str(val).strip() == str(target_report_id).strip():
+            row_num = idx + 1
+            ws_reports.update(f"A{row_num}:AF{row_num}", [new_row_values])
+            sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
+            clear_all_caches()
+            return True
+    return False
+
 def delete_report_by_id(ws_reports, ws_compact, ws_comp, target_report_id):
     col_vals = ws_reports.col_values(1)
     deleted = False
@@ -311,15 +336,17 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.user_info = {}
 if "task_rows" not in st.session_state:
-    st.session_state.task_rows = 3 # 預設直接提供 3 列時段，減少頻繁按按鈕重整
+    st.session_state.task_rows = 3
 if "form_ver" not in st.session_state:
     st.session_state.form_ver = 0
 if "submit_success_msg" not in st.session_state:
     st.session_state.submit_success_msg = ""
 if "confirm_del_id" not in st.session_state:
     st.session_state.confirm_del_id = None
+if "edit_report_id" not in st.session_state:
+    st.session_state.edit_report_id = None
 
-# 【關鍵防掉線機制】：若網頁因手機網路瞬斷或重整導致 session 重置，自動從網址安全憑證無感恢復登入！
+# 【防掉線機制】：若網頁重整，自動從網址安全憑證恢復登入
 if not st.session_state.logged_in:
     saved_u = st.query_params.get("u", "")
     saved_t = st.query_params.get("t", "")
@@ -367,7 +394,6 @@ if not st.session_state.logged_in:
                             "email": user_row["綁定信箱"],
                             "role": user_row["系統權限"]
                         }
-                        # 寫入網址防掉線憑證，確保重整絕不踢出
                         st.query_params["u"] = user_row["登入帳號"]
                         st.query_params["t"] = make_auth_token(user_row["登入帳號"], user_row["密碼雜湊"])
                         st.rerun()
@@ -469,7 +495,6 @@ else:
         
         fv = st.session_state.form_ver
         
-        # 先在最上方選擇今日有哪些特殊項目（勾選後下方表單一次展開，打字過程零刷新！）
         st.markdown("### 📌 步驟一：請先勾選今日有執行的作業項目")
         st.caption("（有執行的打勾即可，下方填表區在您打字與調整時間時，完全不會刷新畫面！）")
         chk_c1, chk_c2, chk_c3, chk_c4, chk_c5, chk_c6 = st.columns(6)
@@ -496,8 +521,6 @@ else:
                 st.session_state.task_rows = max(1, st.session_state.task_rows - 1)
                 st.rerun()
 
-        # 【核心防消失設計】：使用 st.form 將所有時間與文字輸入框保護起來！
-        # 員工在裡面打字、改時間，瀏覽器完全不會重整、不會發送請求，直到最後按下送出！
         with st.form(key=f"daily_report_form_{fv}", clear_on_submit=False):
             st.markdown("### 📝 步驟二：填寫今日工作內容（打字過程零刷新保護中）")
             report_date = st.date_input("📅 回報歸屬日期 (預設為台灣今日)", get_tw_today())
@@ -1071,9 +1094,9 @@ else:
 
             st.divider()
 
-            # 6. 每日回報詳細內容卡片檢視區（含管理員單筆刪除二次確認防呆機制）
-            st.subheader("📋 每日回報詳細內容檢視與刪除管理")
-            st.caption("可於下方直接選擇想查看的月份、同仁或特定日期（預設自動與上方篩選器連動，亦可直接在此獨立切換）：")
+            # 6. 每日回報詳細內容卡片檢視區（含管理員單筆修改 & 單筆刪除二次確認）
+            st.subheader("📋 每日回報詳細內容檢視、修改與刪除管理")
+            st.caption("可於下方直接選擇想查看的月份、同仁或特定日期，並可針對單筆回報直接點擊「✏️ 修改此筆回報內容」更正錯字或數據：")
             
             det_c1, det_c2, det_c3, det_c4 = st.columns(4)
             with det_c1:
@@ -1116,7 +1139,8 @@ else:
                     badge_8d = " 📎【附8D報告】" if row.get("有無8D") == "是" else ""
                     exp_title = f"📅 {row.get('回報日期', '')} ｜ 👤 {row.get('姓名', '')} ｜ 🕒 上下班：{row.get('上班時間', '')}~{row.get('下班時間', '')} ｜ 📦 包貨：{int(row.get('包貨件數', 0))}件 / 🚚 寄貨：{int(row.get('寄貨件數', 0))}件{alert_badge}{badge_8d}"
                     
-                    with st.expander(exp_title, expanded=(idx == 0)):
+                    is_editing_this = (st.session_state.edit_report_id == r_id)
+                    with st.expander(exp_title, expanded=(idx == 0 or is_editing_this)):
                         c1, c2, c3, c4 = st.columns(4)
                         c1.markdown(f"**🕒 出勤時間**\n\n`{row.get('上班時間', '')} ~ {row.get('下班時間', '')}`")
                         if int(row.get("包貨件數", 0)) > 0:
@@ -1176,14 +1200,27 @@ else:
                             )
                             
                         st.markdown("---")
-                        foot_c1, foot_c2 = st.columns([3, 2])
+                        foot_c1, foot_c2, foot_c3 = st.columns([2.5, 1.2, 1.3])
                         foot_c1.caption(f"系統回報單號：{r_id} ｜ 實際送出時間 (台灣時間)：{row.get('送出時間', '')}")
                         
+                        # 修改按鈕
                         with foot_c2:
+                            if is_editing_this:
+                                if st.button("❌ 收合修改面板", key=f"close_edit_{r_id}", use_container_width=True):
+                                    st.session_state.edit_report_id = None
+                                    st.rerun()
+                            else:
+                                if st.button("✏️ 修改此筆回報內容", key=f"adm_edit_{r_id}", use_container_width=True):
+                                    st.session_state.edit_report_id = r_id
+                                    st.session_state.confirm_del_id = None
+                                    st.rerun()
+
+                        # 刪除按鈕（含二次確認）
+                        with foot_c3:
                             if st.session_state.confirm_del_id == f"adm_{r_id}":
-                                st.warning(f"⚠️ 確定要永久刪除「{row.get('回報日期', '')} - {row.get('姓名', '')}」的回報嗎？（刪除後無法復原）")
+                                st.warning(f"⚠️ 確定要永久刪除嗎？")
                                 dc1, dc2 = st.columns(2)
-                                if dc1.button("✅ 確定永久刪除", key=f"yes_adm_{r_id}", type="primary", use_container_width=True):
+                                if dc1.button("✅ 確定", key=f"yes_adm_{r_id}", type="primary", use_container_width=True):
                                     if delete_report_by_id(ws_reports, ws_compact, ws_comp, r_id):
                                         st.session_state.confirm_del_id = None
                                         st.success(f"✅ 已徹底刪除 {row.get('回報日期', '')} - {row.get('姓名', '')} 的回報紀錄！")
@@ -1194,4 +1231,162 @@ else:
                             else:
                                 if st.button("🗑️ 刪除此筆回報紀錄", key=f"adm_del_{r_id}", use_container_width=True):
                                     st.session_state.confirm_del_id = f"adm_{r_id}"
+                                    st.session_state.edit_report_id = None
                                     st.rerun()
+
+                        # ================= 管理員專屬：單筆回報內容原地修改面板 =================
+                        if is_editing_this:
+                            st.markdown("---")
+                            st.info(f"🛠️ **正在修改【{row.get('姓名', '')} - {row.get('回報日期', '')}】的回報內容**（修改後系統將自動重新計算包貨效率、客服與直播時數）")
+                            with st.form(key=f"edit_form_{r_id}"):
+                                e_col1, e_col2, e_col3, e_col4 = st.columns(4)
+                                with e_col1:
+                                    e_date = st.date_input("📅 回報日期", parse_date_safe(row.get("回報日期", "")))
+                                with e_col2:
+                                    e_name = st.text_input("👤 填表人姓名", value=str(row.get("姓名", "")))
+                                with e_col3:
+                                    e_ws = st.time_input("🕒 上班時間", parse_time_safe(row.get("上班時間", "09:00"), datetime.time(9, 0)), step=60)
+                                with e_col4:
+                                    e_we = st.time_input("🕕 下班時間", parse_time_safe(row.get("下班時間", "18:00"), datetime.time(18, 0)), step=60)
+
+                                st.markdown("##### 📦 包貨與 🚚 寄貨修正")
+                                ep1, ep2, ep3, ep4, ep5 = st.columns([1.2, 1.2, 1.2, 1.2, 1.2])
+                                orig_has_pack = int(row.get("包貨件數", 0)) > 0 and str(row.get("包貨開始", "無")) != "無"
+                                with ep1:
+                                    e_has_pack = st.checkbox("📦 當日有包貨", value=orig_has_pack)
+                                with ep2:
+                                    e_ps = st.time_input("包貨開始", parse_time_safe(row.get("包貨開始", "10:00"), datetime.time(10, 0)), step=60)
+                                with ep3:
+                                    e_pe = st.time_input("包貨結束", parse_time_safe(row.get("包貨結束", "12:00"), datetime.time(12, 0)), step=60)
+                                with ep4:
+                                    e_pc = st.number_input("包貨件數 (無則填0)", min_value=0, value=int(row.get("包貨件數", 0)), step=1)
+                                with ep5:
+                                    e_sc = st.number_input("🚚 寄貨件數", min_value=0, value=int(row.get("寄貨件數", 0)), step=1)
+
+                                st.markdown("##### 💬 客服與 🎥 直播時段修正")
+                                ec1, ec2, ec3, ec4, ec5, ec6 = st.columns(6)
+                                orig_has_cs = str(row.get("客服開始", "無")) != "無"
+                                orig_has_lv = str(row.get("直播開始", "無")) != "無"
+                                with ec1:
+                                    e_has_cs = st.checkbox("💬 當日有客服", value=orig_has_cs)
+                                with ec2:
+                                    e_css = st.time_input("客服開始", parse_time_safe(row.get("客服開始", "09:00"), datetime.time(9, 0)), step=60)
+                                with ec3:
+                                    e_cse = st.time_input("客服結束", parse_time_safe(row.get("客服結束", "18:00"), datetime.time(18, 0)), step=60)
+                                with ec4:
+                                    e_has_lv = st.checkbox("🎥 當日有直播", value=orig_has_lv)
+                                with ec5:
+                                    e_lvs = st.time_input("直播開始", parse_time_safe(row.get("直播開始", "19:00"), datetime.time(19, 0)), step=60)
+                                with ec6:
+                                    e_lve = st.time_input("直播結束", parse_time_safe(row.get("直播結束", "22:00"), datetime.time(22, 0)), step=60)
+
+                                st.markdown("##### 📝 今日處理事項、提案與想法修正")
+                                e_tasks = st.text_area("今日處理事項明細 (一行一條)", value=str(row.get("今日處理事項", "")), height=110)
+                                ep_col1, ep_col2 = st.columns(2)
+                                with ep_col1:
+                                    e_prop = st.text_area("💡 提案改善", value=str(row.get("提案改善", "")))
+                                with ep_col2:
+                                    e_peer = st.text_area("🤝 對其他同仁想法", value=str(row.get("對同仁想法", "")))
+
+                                st.markdown("##### 🚨 客訴 5W1H 與 8D 檔案修正")
+                                e_hc_col1, e_hc_col2 = st.columns(2)
+                                with e_hc_col1:
+                                    e_has_comp = st.selectbox("有無客訴", ["無", "有"], index=1 if row.get("有無客訴") == "有" else 0)
+                                with e_hc_col2:
+                                    where_opts = ["", "直播上", "LINE客服上", "LINE社群", "其他"]
+                                    curr_w = str(row.get("客訴_Where", ""))
+                                    w_idx = where_opts.index(curr_w) if curr_w in where_opts else 0
+                                    e_cwhere = st.selectbox("2. 【Where】發生管道", where_opts, index=w_idx)
+
+                                ew1, ew2 = st.columns(2)
+                                with ew1:
+                                    e_cwho = st.text_input("1. 【Who】客人本名 + TK名", value=str(row.get("客訴_Who", "")))
+                                with ew2:
+                                    e_cwhen = st.text_input("3. 【When】訂單與客訴日期", value=str(row.get("客訴_When", "")))
+                                e_cwhat = st.text_area("4. 【What】發生什麼事 / 商品問題", value=str(row.get("客訴_What", "")), height=70)
+                                e_cwhy = st.text_area("5. 【Why】客訴背後原因", value=str(row.get("客訴_Why", "")), height=70)
+                                e_chow = st.text_area("6. 【How】解決方案與未來改善", value=str(row.get("客訴_How", "")), height=70)
+
+                                e_has_8d = st.checkbox("📄 附有 8D 報告", value=(row.get("有無8D") == "是"))
+                                e_new_8d_file = st.file_uploader("若要替換或補傳 8D 檔案請在此上傳 (不傳則保留原檔案)", type=["xlsx", "xls", "docx", "doc", "pdf"])
+
+                                save_edit_btn = st.form_submit_button("💾 儲存所有修改內容", type="primary", use_container_width=True)
+
+                            if save_edit_btn:
+                                with st.spinner("🔄 正在更新回報資料並重新計算統計指標..."):
+                                    # 重新計算包貨數據
+                                    if e_has_pack and e_pc > 0:
+                                        new_ps_str = e_ps.strftime("%H:%M")
+                                        new_pe_str = e_pe.strftime("%H:%M")
+                                        new_p_dur = calc_minutes(e_ps, e_pe)
+                                        new_min_per_p = round(new_p_dur / e_pc, 2)
+                                        new_pc_val = e_pc
+                                    else:
+                                        new_ps_str, new_pe_str = "無", "無"
+                                        new_p_dur, new_min_per_p, new_pc_val = 0, 0, 0
+
+                                    # 重新計算客服數據
+                                    if e_has_cs:
+                                        new_css_str = e_css.strftime("%H:%M")
+                                        new_cse_str = e_cse.strftime("%H:%M")
+                                        new_cs_dur = calc_minutes(e_css, e_cse)
+                                    else:
+                                        new_css_str, new_cse_str, new_cs_dur = "無", "無", 0
+
+                                    # 重新計算直播數據
+                                    if e_has_lv:
+                                        new_lvs_str = e_lvs.strftime("%H:%M")
+                                        new_lve_str = e_lve.strftime("%H:%M")
+                                        new_lv_dur = calc_minutes(e_lvs, e_lve)
+                                    else:
+                                        new_lvs_str, new_lve_str, new_lv_dur = "無", "無", 0
+
+                                    # 處理 8D 檔案
+                                    final_8d_flag = "是" if e_has_8d else "否"
+                                    final_8d_name = str(row.get("8D檔名", "")) if e_has_8d else ""
+                                    final_8d_b64 = str(row.get("8D檔案編碼", "")) if e_has_8d else ""
+                                    if e_has_8d and e_new_8d_file is not None:
+                                        final_8d_name = e_new_8d_file.name
+                                        final_8d_b64 = base64.b64encode(e_new_8d_file.read()).decode("utf-8")
+
+                                    updated_row = [
+                                        r_id,
+                                        str(row.get("送出時間", "")),
+                                        str(e_date),
+                                        str(row.get("帳號", "")),
+                                        e_name.strip(),
+                                        e_ws.strftime("%H:%M"),
+                                        e_we.strftime("%H:%M"),
+                                        new_ps_str,
+                                        new_pe_str,
+                                        new_pc_val,
+                                        new_p_dur,
+                                        new_min_per_p,
+                                        new_css_str,
+                                        new_cse_str,
+                                        new_cs_dur,
+                                        e_sc,
+                                        new_lvs_str,
+                                        new_lve_str,
+                                        new_lv_dur,
+                                        e_has_comp,
+                                        e_cwho.strip() if e_has_comp == "有" else "",
+                                        e_cwhere if e_has_comp == "有" else "",
+                                        e_cwhen.strip() if e_has_comp == "有" else "",
+                                        e_cwhat.strip() if e_has_comp == "有" else "",
+                                        e_cwhy.strip() if e_has_comp == "有" else "",
+                                        e_chow.strip() if e_has_comp == "有" else "",
+                                        final_8d_flag,
+                                        final_8d_name,
+                                        final_8d_b64,
+                                        e_tasks.strip(),
+                                        e_prop.strip(),
+                                        e_peer.strip()
+                                    ]
+
+                                    if update_report_by_id(ws_reports, ws_compact, ws_comp, r_id, updated_row):
+                                        st.session_state.edit_report_id = None
+                                        st.success(f"✅ 已成功修改並更新 **{e_name} ({e_date})** 的回報內容！")
+                                        st.rerun()
+                                    else:
+                                        st.error("❌ 找不到該筆單號，無法更新，請重新整理網頁後再試。")
