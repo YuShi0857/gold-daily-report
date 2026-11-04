@@ -55,20 +55,22 @@ COMPLAINT_HEADERS = [
     "6.解決與改善(How)", "有無附8D報告", "8D檔案名稱", "回報單號"
 ]
 
-# 操台部門標題
+# 操台部門標題（已升級包含 5W1H 客訴細項與 8D 報告）
 CAOTAI_HEADERS = [
     "回報單號", "送出時間", "回報日期", "帳號", "姓名",
     "工作機或賴名稱", "上班時間", "下班時間", "上班總分鐘", "上班總時數(小時)",
     "直播台名稱", "直播台粉專網址", "操台時間", "操台時數(小時)",
     "總留言_點讚_分享", "直播需求", "直播需求是否達成",
     "直播中客訴", "操台外處理事項", "直播台整體操台感受", "提案改善",
-    "需求截圖檔名", "需求截圖編碼"
+    "需求截圖檔名", "需求截圖編碼",
+    "有無客訴", "客訴_Who", "客訴_Where", "客訴_When", "客訴_What", "客訴_Why", "客訴_How",
+    "有無8D", "8D檔名", "8D檔案編碼"
 ]
 
 CAOTAI_COMPACT_HEADERS = [
     "回報日期", "姓名", "工作機/賴名稱", "上下班時間(當日工時)",
     "直播台名稱", "操台時間(時數)", "留言/點讚/分享",
-    "直播需求", "是否達成", "直播中客訴", "操台外處理事項",
+    "直播需求", "是否達成", "有無客訴", "直播中客訴(5W1H)", "操台外處理事項(時段明細)",
     "整體操台感受", "提案改善", "回報單號"
 ]
 
@@ -120,15 +122,12 @@ def calc_minutes_str(s1, s2):
         return 0
 
 def parse_caotai_hours(text):
-    """自動從操台時間文字（例如：21:06-23:33(2.5H) 或多台紀錄）解析出總操台小時數"""
     if not text or str(text).strip() in ["無", ""]:
         return 0.0
     s = str(text)
-    # 1. 優先抓取括號內標註的 (2.5H) 或 (2.5小時)
     h_matches = re.findall(r'[\(\（]\s*(\d+(?:\.\d+)?)\s*[hH小時]+[\)\）]', s)
     if h_matches:
         return round(sum(float(x) for x in h_matches), 2)
-    # 2. 若未寫括號時數，自動抓 21:06-23:33 時間區間計算
     t_matches = re.findall(r'(\d{1,2}:\d{2})\s*[-~～至]\s*(\d{1,2}:\d{2})', s)
     if t_matches:
         total_m = sum(calc_minutes_str(t1, t2) for t1, t2 in t_matches)
@@ -222,11 +221,10 @@ def get_worksheets_cached():
         ws_comp = sh.add_worksheet(title="🚨 客訴與異常紀錄", rows="500", cols="12")
         ws_comp.append_row(COMPLAINT_HEADERS)
 
-    # 新增：操台部門底層資料表與美化總覽表
     try:
         ws_caotai = sh.worksheet("caotai_reports")
     except:
-        ws_caotai = sh.add_worksheet(title="caotai_reports", rows="1000", cols="25")
+        ws_caotai = sh.add_worksheet(title="caotai_reports", rows="1000", cols="35")
         ws_caotai.append_row(CAOTAI_HEADERS)
         try:
             ws_caotai.hide()
@@ -396,6 +394,16 @@ def sync_caotai_pretty_sheet(ws_caotai, ws_caotai_compact, apply_style=False):
             w_min = calc_minutes_str(r.get("上班時間", ""), r.get("下班時間", ""))
             w_hr = round(w_min / 60.0, 2)
             ct_hr = r.get("操台時數(小時)", "") or parse_caotai_hours(r.get("操台時間", ""))
+            
+            has_c = r.get("有無客訴", "")
+            if not has_c:
+                has_c = "有" if str(r.get("直播中客訴", "無")).strip() not in ["無", ""] else "無"
+                
+            if r.get("客訴_Who"):
+                comp_summary = f"【Who】{r.get('客訴_Who','')}\n【Where】{r.get('客訴_Where','')}\n【When】{r.get('客訴_When','')}\n【What】{r.get('客訴_What','')}\n【Why】{r.get('客訴_Why','')}\n【How】{r.get('客訴_How','')}"
+            else:
+                comp_summary = str(r.get("直播中客訴", "無"))
+
             compact_rows.append([
                 str(r.get("回報日期", "")),
                 str(r.get("姓名", "")),
@@ -406,7 +414,8 @@ def sync_caotai_pretty_sheet(ws_caotai, ws_caotai_compact, apply_style=False):
                 str(r.get("總留言_點讚_分享", "")),
                 str(r.get("直播需求", "")),
                 str(r.get("直播需求是否達成", "")),
-                str(r.get("直播中客訴", "")),
+                has_c,
+                comp_summary,
                 str(r.get("操台外處理事項", "")),
                 str(r.get("直播台整體操台感受", "")),
                 str(r.get("提案改善", "")),
@@ -518,6 +527,8 @@ if "logged_in" not in st.session_state:
     st.session_state.user_info = {}
 if "task_rows" not in st.session_state:
     st.session_state.task_rows = 3
+if "ct_task_rows" not in st.session_state:
+    st.session_state.ct_task_rows = 3
 if "form_ver" not in st.session_state:
     st.session_state.form_ver = 0
 if "submit_success_msg" not in st.session_state:
@@ -658,7 +669,6 @@ else:
     st.sidebar.caption(f"🕒 台灣時間：{get_tw_now().strftime('%Y-%m-%d %H:%M')}")
     st.sidebar.success("🔒 防掉線保護已啟動（重整不登出）")
     
-    # 根據部門動態組合左側選單
     menu_options = []
     if user["role"] == "admin":
         menu_options.extend(["📊 主管後台數據中心", "👥 帳號與權限管理"])
@@ -917,7 +927,7 @@ else:
                                     st.rerun()
 
     # =========================================================================
-    # ---------------- 功能 A2：操台部門 - 每日工作回報 ----------------
+    # ---------------- 功能 A2：操台部門 - 每日工作回報 (升級 5W1H 客訴 & 時段事項) ----------------
     # =========================================================================
     elif choice == "🎛️ 操台部門 - 每日工作回報":
         st.title("🎛️ 操台部門 - 每日工作回報單")
@@ -930,8 +940,32 @@ else:
         st.info(f"📌 填表人：**{user['name']}** （已自動綁定姓名） ｜ ⏱️ 系統將根據您的上下班時間與操台時間，**自動計算當日與當月累計上班時數**！")
         
         fv = st.session_state.form_ver
+
+        # 步驟一：像黃金部門一樣，先在上方勾選有無客訴、有無8D、有無操台外事項
+        st.markdown("### 📌 步驟一：請先勾選今日是否有客訴或操台外處理事項")
+        st.caption("（有發生或有執行的項目打勾即可展開填寫；遠端人員若無操台外協助，取消勾選『今日有操台外處理事項』系統就會自動幫您填入『無』！）")
+        ct_chk1, ct_chk2, ct_chk3 = st.columns(3)
+        with ct_chk1:
+            ct_has_other_chk = st.checkbox("🛠️ 今日有操台外處理事項 (遠端無協助則免勾)", value=True, key=f"ct_ho_{fv}")
+        with ct_chk2:
+            ct_has_comp_chk = st.checkbox("🚨 今日直播中有客訴", value=False, key=f"ct_hc_{fv}")
+        with ct_chk3:
+            ct_has_8d_chk = st.checkbox("📄 重大異常需附 8D 報告檔案", value=False, key=f"ct_h8d_{fv}")
+
+        if ct_has_other_chk:
+            col_cbtn1, col_cbtn2, _ = st.columns([1.8, 1.8, 4])
+            with col_cbtn1:
+                if st.button("➕ 增加操台外事項欄位 (目前 " + str(st.session_state.ct_task_rows) + " 條)"):
+                    st.session_state.ct_task_rows += 2
+                    st.rerun()
+            with col_cbtn2:
+                if st.button("➖ 減少操台外事項欄位") and st.session_state.ct_task_rows > 1:
+                    st.session_state.ct_task_rows = max(1, st.session_state.ct_task_rows - 1)
+                    st.rerun()
+
         with st.form(key=f"caotai_report_form_{fv}", clear_on_submit=False):
-            st.markdown("### 一、 出勤時間與工作設備")
+            st.markdown("### 📝 步驟二：填寫今日操台工作內容（打字過程零刷新保護中）")
+            st.markdown("#### 一、 出勤時間與工作設備")
             ct_col1, ct_col2 = st.columns(2)
             with ct_col1:
                 ct_date = st.date_input("📅 日期 *", get_tw_today())
@@ -948,7 +982,7 @@ else:
                 st.caption("⚠️ 不可湊整，請務必與打卡紙上相同 (遠端人員請務必與下機時間相同)")
 
             st.divider()
-            st.markdown("### 二、 直播操台數據與需求紀錄")
+            st.markdown("#### 二、 直播操台數據與需求紀錄")
             s_c1, s_c2 = st.columns(2)
             with s_c1:
                 ct_stream_name = st.text_input("🎥 直播台名稱 *", placeholder="請輸入直播台名稱")
@@ -967,7 +1001,7 @@ else:
             ct_req = st.text_area(
                 "📋 直播需求 *",
                 placeholder="請詳細說明直播需求，禁止只打加單關鍵字反饋互動；如果有不同直播台請分開備註...",
-                height=100
+                height=90
             )
             st.caption("請詳細說明直播需求禁止只打加單關鍵字反饋互動，如果每日工作回報內台性那需要調整，就直接協助新增並附上截圖。如果有不同直播台請分開備註")
             ct_req_img = st.file_uploader("📸 附上直播需求調整截圖 (選填，支援圖片或PDF)", type=["png", "jpg", "jpeg", "pdf"])
@@ -979,22 +1013,47 @@ else:
             )
             st.caption("請依上題所述需求詳細說明，如未達成請詳述原因")
 
+            # 動態展開：直播中客訴 5W1H（比照黃金部門結構，文字貼合操台直播情境）
+            ct_c_who = ct_c_where = ct_c_when = ct_c_what = ct_c_why = ct_c_how = ""
+            if ct_has_comp_chk:
+                st.divider()
+                st.markdown("#### 三、 🚨 直播中客訴詳細回報 (5W1H)")
+                st.caption("有客訴請詳細填寫以下各欄（如果有不同直播台請分開備註）：")
+                ct_c_who = st.text_input("1. 【Who】客訴客人名稱 (FB/LINE/IG帳號) ＋ 發生之直播台名稱 *")
+                ct_c_where = st.selectbox("2. 【Where】客訴發生管道 *", ["直播留言區", "粉專私訊", "LINE官方/社群", "其他"])
+                ct_c_when = st.text_input("3. 【When】客訴發生時間點 ／ 幾月幾號的場次或訂單 *")
+                ct_c_what = st.text_area("4. 【What】發生什麼事 ／ 客訴問題詳情 (請詳細打字說明) *", height=80)
+                ct_c_why = st.text_area("5. 【Why】客訴背後原因分析 *", height=80)
+                ct_c_how = st.text_area("6. 【How】處理方式 ／ 是否處理完成 ／ 客訴最終處理結果與未來改善 *", height=80)
+
+            ct_uploaded_8d = None
+            if ct_has_8d_chk:
+                st.divider()
+                st.markdown("#### 📄 重大異常 8D 報告檔案上傳")
+                ct_uploaded_8d = st.file_uploader("請上傳填妥之 8D 檔案 (支援 Excel, Word, PDF，建議小於 1MB)", type=["xlsx", "xls", "docx", "doc", "pdf"], key=f"ct_u8d_{fv}")
+
+            # 操台外處理事項：比照黃金部門「開始時間、結束時間、處理事項內容」制式規格
             st.divider()
-            st.markdown("### 三、 客訴、操台外事項與心得提案")
-            ct_complaint = st.text_area(
-                "🚨 直播中客訴 *",
-                placeholder="有客訴請詳細說明客訴原因，處理方式，是否處理完成，客訴最終處理結果。無客訴直接打無",
-                height=80
-            )
-            st.caption("有客訴請詳細說明客訴原因，處理方式，是否處理完成，客訴最終處理結果｜無客訴直接打無｜如果有不同直播台請分開備註")
+            st.markdown("#### 四、 🛠️ 操台外處理事項明細")
+            ct_raw_tasks = []
+            if ct_has_other_chk:
+                st.caption("請依照上班時間軸清楚標註幾點幾分到幾點幾分做了哪些事（空白未填的列會自動忽略，不夠可點上方『➕ 增加操台外事項欄位』）")
+                for i in range(st.session_state.ct_task_rows):
+                    tc1, tc2, tc3 = st.columns([1.5, 1.5, 5])
+                    def_h1 = min(13 + i, 22)
+                    def_h2 = min(14 + i, 23)
+                    with tc1:
+                        cts = st.time_input(f"開始時間 #{i+1}", datetime.time(def_h1, 0), key=f"ct_ts_{fv}_{i}", step=60)
+                    with tc2:
+                        cte = st.time_input(f"結束時間 #{i+1}", datetime.time(def_h2, 0), key=f"ct_te_{fv}_{i}", step=60)
+                    with tc3:
+                        ctd = st.text_input(f"操台外處理事項內容 #{i+1}", placeholder="請輸入該時段具體完成的操台外事項（無則留空即可）...", key=f"ct_td_{fv}_{i}")
+                    ct_raw_tasks.append((cts, cte, ctd))
+            else:
+                st.info("💡 您已取消勾選「今日有操台外處理事項」（遠端人員無提供操台外協助），系統送出時將自動為您記錄為「無」。")
 
-            ct_other_tasks = st.text_area(
-                "🛠️ 操台外處理事項 *",
-                placeholder="請依照上班時間軸詳細敘述。遠端人員若無提供操台外協助請直接打無",
-                height=90
-            )
-            st.caption("請依照上班時間軸詳細敘述｜遠端人員若無提供操台外協助請直接打無")
-
+            st.divider()
+            st.markdown("#### 五、 💬 整體操台感受與提案改善")
             ct_feeling = st.text_area(
                 "💬 直播台整體操台感受 *",
                 placeholder="請詳述整體節奏、客人加單狀況、客人互動狀況、直播客人熱絡度等等，有任何想法都直接打上來尤其是自己的台",
@@ -1012,13 +1071,34 @@ else:
             ct_submit = st.form_submit_button("🚀 確認無誤，送出操台部門今日回報", type="primary", use_container_width=True)
 
         if ct_submit:
-            required_fields = [
+            ct_tasks_list = []
+            if ct_has_other_chk:
+                for cts, cte, ctd in ct_raw_tasks:
+                    if ctd.strip():
+                        ct_tasks_list.append(f"【{cts.strftime('%H:%M')} - {cte.strftime('%H:%M')}】{ctd.strip()}")
+                ct_other_tasks_str = "\n".join(ct_tasks_list)
+            else:
+                ct_other_tasks_str = "無"
+
+            ct_has_complaint = "有" if ct_has_comp_chk else "無"
+            ct_8d_name, ct_8d_b64 = "", ""
+            if ct_has_8d_chk and ct_uploaded_8d is not None:
+                ct_8d_name = ct_uploaded_8d.name
+                ct_8d_b64 = base64.b64encode(ct_uploaded_8d.read()).decode("utf-8")
+
+            base_req_fields = [
                 ct_device.strip(), ct_stream_name.strip(), ct_fanpage_url.strip(),
                 ct_op_time.strip(), ct_metrics.strip(), ct_req.strip(),
-                ct_req_met.strip(), ct_complaint.strip(), ct_other_tasks.strip(), ct_feeling.strip()
+                ct_req_met.strip(), ct_feeling.strip()
             ]
-            if not all(required_fields):
-                st.error("❌ 標註「*」號的題目皆為必填！（若無客訴或無操台外事項，請在框內輸入『無』，您剛才打的字都還保留在上方框內，補齊後再按送出即可）")
+            if not all(base_req_fields):
+                st.error("❌ 標註「*」號的基本欄位皆為必填！（您剛才打的字都還保留在上方框內，補齊後再按送出即可）")
+            elif ct_has_comp_chk and not all([ct_c_who.strip(), ct_c_when.strip(), ct_c_what.strip(), ct_c_why.strip(), ct_c_how.strip()]):
+                st.error("❌ 您勾選了「今日直播中有客訴」，請將客訴 5W1H 所有欄位填寫完整！")
+            elif ct_has_8d_chk and not ct_8d_name:
+                st.error("❌ 您勾選了「需附 8D 報告檔案」，請務必選擇檔案上傳！")
+            elif ct_has_other_chk and not ct_tasks_list:
+                st.error("❌ 請至少填寫一條「操台外處理事項」！（若您是遠端人員無操台外協助，請取消勾選最上方的『🛠️ 今日有操台外處理事項』即可）")
             else:
                 with st.spinner("🚀 正在安全傳送您的操台回報資料..."):
                     work_min = calc_minutes(ct_ws, ct_we)
@@ -1029,6 +1109,18 @@ else:
                     if ct_req_img is not None:
                         img_name = ct_req_img.name
                         img_b64 = base64.b64encode(ct_req_img.read()).decode("utf-8")
+
+                    if ct_has_comp_chk:
+                        combined_comp_str = (
+                            f"1.【Who】{ct_c_who.strip()}\n"
+                            f"2.【Where】{ct_c_where}\n"
+                            f"3.【When】{ct_c_when.strip()}\n"
+                            f"4.【What】{ct_c_what.strip()}\n"
+                            f"5.【Why】{ct_c_why.strip()}\n"
+                            f"6.【How】{ct_c_how.strip()}"
+                        )
+                    else:
+                        combined_comp_str = "無"
 
                     clean_cdate = normalize_date_str(ct_date)
                     was_overwritten = delete_existing_same_day_report(ws_caotai, user["username"], clean_cdate)
@@ -1054,18 +1146,29 @@ else:
                         "總留言_點讚_分享": ct_metrics.strip(),
                         "直播需求": ct_req.strip(),
                         "直播需求是否達成": ct_req_met.strip(),
-                        "直播中客訴": ct_complaint.strip(),
-                        "操台外處理事項": ct_other_tasks.strip(),
+                        "直播中客訴": combined_comp_str,
+                        "操台外處理事項": ct_other_tasks_str,
                         "直播台整體操台感受": ct_feeling.strip(),
                         "提案改善": ct_proposal.strip() or "無",
                         "需求截圖檔名": img_name,
-                        "需求截圖編碼": img_b64
+                        "需求截圖編碼": img_b64,
+                        "有無客訴": ct_has_complaint,
+                        "客訴_Who": ct_c_who.strip() if ct_has_comp_chk else "",
+                        "客訴_Where": ct_c_where if ct_has_comp_chk else "",
+                        "客訴_When": ct_c_when.strip() if ct_has_comp_chk else "",
+                        "客訴_What": ct_c_what.strip() if ct_has_comp_chk else "",
+                        "客訴_Why": ct_c_why.strip() if ct_has_comp_chk else "",
+                        "客訴_How": ct_c_how.strip() if ct_has_comp_chk else "",
+                        "有無8D": "是" if ct_has_8d_chk else "否",
+                        "8D檔名": ct_8d_name,
+                        "8D檔案編碼": ct_8d_b64
                     }
 
                     write_dict_to_sheet(ws_caotai, CAOTAI_HEADERS, caotai_dict, target_report_id=None)
                     sync_caotai_pretty_sheet(ws_caotai, ws_caotai_compact)
                     clear_all_caches()
 
+                    st.session_state.ct_task_rows = 3
                     st.session_state.form_ver += 1
                     if was_overwritten:
                         st.session_state.submit_success_msg = f"✅ 【覆蓋成功】您於 {clean_cdate} 的操台回報已更新（當日上班時數：{work_hr} 小時 / 操台時數：{op_hr} 小時）！"
@@ -1125,7 +1228,7 @@ else:
                     st.success("✅ 密碼更新成功！")
 
     # =========================================================================
-    # ---------------- 功能 C：帳號與權限管理 (含部門指派) ----------------
+    # ---------------- 功能 C：帳號與權限管理 ----------------
     # =========================================================================
     elif choice == "👥 帳號與權限管理" and user["role"] == "admin":
         st.title("👥 雙部門帳號、部門歸屬與權限管理中心")
@@ -1701,363 +1804,4 @@ else:
                                     e_chow = st.text_area("6. 【How】解決方案與未來改善", value=str(row.get("客訴_How", "")), height=60)
 
                                     e_has_8d = st.checkbox("📄 附有 8D 報告", value=(row.get("有無8D") == "是"))
-                                    e_new_8d_file = st.file_uploader("若要替換或補傳 8D 檔案請在此上傳", type=["xlsx", "xls", "docx", "doc", "pdf"])
-
-                                    save_edit_btn = st.form_submit_button("💾 儲存所有修改內容 (立即更新圖表與統計)", type="primary", use_container_width=True)
-
-                                if save_edit_btn:
-                                    with st.spinner("🔄 正在更新回報資料並重新計算統計指標..."):
-                                        new_w_dur = calc_minutes(e_ws, e_we)
-                                        if e_pc > 0:
-                                            new_ps_str, new_pe_str = e_ps.strftime("%H:%M"), e_pe.strftime("%H:%M")
-                                            new_p_dur = calc_minutes(e_ps, e_pe)
-                                            new_min_per_p = round(new_p_dur / e_pc, 2)
-                                            new_pc_val = e_pc
-                                        else:
-                                            new_ps_str, new_pe_str = "無", "無"
-                                            new_p_dur, new_min_per_p, new_pc_val = 0, 0, 0
-
-                                        if e_has_cs:
-                                            new_css_str, new_cse_str = e_css.strftime("%H:%M"), e_cse.strftime("%H:%M")
-                                            new_cs_dur = calc_minutes(e_css, e_cse)
-                                        else:
-                                            new_css_str, new_cse_str, new_cs_dur = "無", "無", 0
-
-                                        if e_has_lv:
-                                            new_lvs_str, new_lve_str = e_lvs.strftime("%H:%M"), e_lve.strftime("%H:%M")
-                                            new_lv_dur = calc_minutes(e_lvs, e_lve)
-                                        else:
-                                            new_lvs_str, new_lve_str, new_lv_dur = "無", "無", 0
-
-                                        final_8d_flag = "是" if e_has_8d else "否"
-                                        final_8d_name = str(row.get("8D檔名", "")) if e_has_8d else ""
-                                        final_8d_b64 = str(row.get("8D檔案編碼", "")) if e_has_8d else ""
-                                        if e_has_8d and e_new_8d_file is not None:
-                                            final_8d_name = e_new_8d_file.name
-                                            final_8d_b64 = base64.b64encode(e_new_8d_file.read()).decode("utf-8")
-
-                                        clean_edate = normalize_date_str(e_date)
-                                        updated_dict = {
-                                            "回報單號": r_id,
-                                            "送出時間": str(row.get("送出時間", "")),
-                                            "回報日期": clean_edate,
-                                            "帳號": str(row.get("帳號", "")),
-                                            "姓名": e_name.strip(),
-                                            "上班時間": e_ws.strftime("%H:%M"),
-                                            "下班時間": e_we.strftime("%H:%M"),
-                                            "上班總分鐘": new_w_dur,
-                                            "包貨開始": new_ps_str,
-                                            "包貨結束": new_pe_str,
-                                            "包貨件數": new_pc_val,
-                                            "包貨總分鐘": new_p_dur,
-                                            "單件包貨耗時(分)": new_min_per_p,
-                                            "客服開始": new_css_str,
-                                            "客服結束": new_cse_str,
-                                            "客服總分鐘": new_cs_dur,
-                                            "寄貨件數": e_sc,
-                                            "直播開始": new_lvs_str,
-                                            "直播結束": new_lve_str,
-                                            "直播總分鐘": new_lv_dur,
-                                            "有無客訴": e_has_comp,
-                                            "客訴_Who": e_cwho.strip() if e_has_comp == "有" else "",
-                                            "客訴_Where": e_cwhere if e_has_comp == "有" else "",
-                                            "客訴_When": e_cwhen.strip() if e_has_comp == "有" else "",
-                                            "客訴_What": e_cwhat.strip() if e_has_comp == "有" else "",
-                                            "客訴_Why": e_cwhy.strip() if e_has_comp == "有" else "",
-                                            "客訴_How": e_chow.strip() if e_has_comp == "有" else "",
-                                            "有無8D": final_8d_flag,
-                                            "8D檔名": final_8d_name,
-                                            "8D檔案編碼": final_8d_b64,
-                                            "今日處理事項": e_tasks.strip(),
-                                            "提案改善": e_prop.strip(),
-                                            "對同仁想法": e_peer.strip()
-                                        }
-
-                                        if write_dict_to_sheet(ws_reports, REPORT_HEADERS, updated_dict, target_report_id=r_id):
-                                            sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
-                                            clear_all_caches()
-                                            st.session_state.edit_report_id = None
-                                            st.rerun()
-
-        # ---------------------------------------------------------------------
-        # 分頁 2：操台部門後台（含當月上班總時數、操台時數自動結算與明細管理）
-        # ---------------------------------------------------------------------
-        with dept_tab2:
-            df_ct = load_caotai_df()
-            if df_ct.empty:
-                st.info("目前操台部門尚無任何回報資料。您可以先點選左側「🎛️ 操台部門 - 每日工作回報」測試送出一筆！")
-            else:
-                df_ct["上班總分鐘"] = df_ct.apply(lambda r: calc_minutes_str(r.get("上班時間", ""), r.get("下班時間", "")), axis=1)
-                df_ct["上班總時數(小時)"] = (df_ct["上班總分鐘"] / 60.0).round(2)
-                df_ct["操台時數(小時)"] = df_ct.apply(lambda r: parse_caotai_hours(r.get("操台時間", "")), axis=1)
-                df_ct["月份"] = df_ct["回報日期"].astype(str).str.slice(0, 7)
-
-                st.markdown("### 🔍 操台部門 - 月份與人員工時篩選器")
-                ct_f1, ct_f2 = st.columns(2)
-                with ct_f1:
-                    ct_months = ["全部月份"] + sorted(df_ct["月份"].unique().tolist(), reverse=True)
-                    sel_ct_month = st.selectbox("📅 選擇統計月份", ct_months, key="ct_m_top")
-                with ct_f2:
-                    ct_names = ["全部同仁"] + sorted(df_ct["姓名"].unique().tolist())
-                    sel_ct_name = st.selectbox("👤 選擇統計同仁", ct_names, key="ct_n_top")
-
-                f_ct_df = df_ct.copy()
-                if sel_ct_month != "全部月份":
-                    f_ct_df = f_ct_df[f_ct_df["月份"] == sel_ct_month]
-                if sel_ct_name != "全部同仁":
-                    f_ct_df = f_ct_df[f_ct_df["姓名"] == sel_ct_name]
-
-                tot_ct_days = len(f_ct_df)
-                tot_ct_work_hr = round(f_ct_df["上班總時數(小時)"].sum(), 2)
-                tot_ct_op_hr = round(f_ct_df["操台時數(小時)"].sum(), 2)
-                tot_ct_comp = int(f_ct_df["直播中客訴"].apply(lambda x: str(x).strip() not in ["無", ""]).sum())
-
-                ck1, ck2, ck3, ck4 = st.columns(4)
-                ck1.metric("📅 區間總出勤天數/次數", f"{tot_ct_days} 次")
-                ck2.metric("🕒 區間累計上班總時數", f"{tot_ct_work_hr} 小時")
-                ck3.metric("🎛️ 區間累計操台總時數", f"{tot_ct_op_hr} 小時")
-                ck4.metric("🚨 直播有客訴筆數", f"{tot_ct_comp} 筆")
-
-                st.divider()
-
-                st.subheader(f"📈 操台部門 - 各同仁當月上班總時數與統計總表 ({sel_ct_month} - {sel_ct_name})")
-                if not f_ct_df.empty:
-                    ct_summary_df = f_ct_df.groupby("姓名").agg(
-                        出勤回報天數=("回報單號", "count"),
-                        當月上班總時數_小時=("上班總時數(小時)", lambda x: round(x.sum(), 2)),
-                        平均每日上班時數_小時=("上班總時數(小時)", lambda x: round(x.mean(), 2)),
-                        當月操台總時數_小時=("操台時數(小時)", lambda x: round(x.sum(), 2)),
-                        直播客訴發生次數=("直播中客訴", lambda x: int((x.astype(str).str.strip() != "無") & (x.astype(str).str.strip() != "")).sum())
-                    ).reset_index()
-                    st.dataframe(ct_summary_df, use_container_width=True)
-
-                st.divider()
-
-                # 匯出操台部門美化版 Excel
-                st.subheader("📥 匯出操台部門美化版分頁 Excel 報表")
-                ct_dl1, ct_dl2 = st.columns([2, 1])
-
-                ct_export_df = pd.DataFrame({
-                    "回報日期": f_ct_df["回報日期"],
-                    "姓名": f_ct_df["姓名"],
-                    "工作機或賴名稱": f_ct_df["工作機或賴名稱"],
-                    "上班時間": f_ct_df["上班時間"],
-                    "下班時間": f_ct_df["下班時間"],
-                    "當日上班時數(小時)": f_ct_df["上班總時數(小時)"],
-                    "直播台名稱": f_ct_df["直播台名稱"],
-                    "直播台粉專網址": f_ct_df["直播台粉專網址"],
-                    "操台時間": f_ct_df["操台時間"],
-                    "操台時數(小時)": f_ct_df["操台時數(小時)"],
-                    "總留言/點讚/分享": f_ct_df["總留言_點讚_分享"],
-                    "直播需求": f_ct_df["直播需求"],
-                    "需求是否達成": f_ct_df["直播需求是否達成"],
-                    "直播中客訴": f_ct_df["直播中客訴"],
-                    "操台外處理事項": f_ct_df["操台外處理事項"],
-                    "整體操台感受": f_ct_df["直播台整體操台感受"],
-                    "提案改善": f_ct_df["提案改善"]
-                })
-
-                ct_output = io.BytesIO()
-                with pd.ExcelWriter(ct_output, engine="openpyxl") as writer:
-                    if not f_ct_df.empty:
-                        ct_summary_df.to_excel(writer, index=False, sheet_name="1_操台人員月度總工時統計")
-                    ct_export_df.to_excel(writer, index=False, sheet_name="2_操台每日回報明細")
-                    style_excel_File(writer)
-
-                safe_ct_p = sel_ct_month if ("全部" not in sel_ct_month) else "ALL"
-                with ct_dl1:
-                    st.download_button(
-                        label="📊 點擊下載【操台部門】工時統計與明細 Excel 報表 (.xlsx)",
-                        data=ct_output.getvalue(),
-                        file_name=f"Caotai_Report_{safe_ct_p}_{get_tw_today().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        type="primary",
-                        use_container_width=True
-                    )
-                with ct_dl2:
-                    if st.button("✨ 重新美化並同步操台 Google 試算表", key="sync_ct_btn", use_container_width=True):
-                        sync_caotai_pretty_sheet(ws_caotai, ws_caotai_compact, apply_style=True)
-                        clear_all_caches()
-                        st.success("✅ 已將線上『🎛️ 操台作業總覽』分頁重新排版上色並同步最新資料！")
-
-                st.divider()
-
-                # 操台部門詳細卡片檢視、修改與刪除
-                st.subheader("📋 操台部門 - 每日回報詳細內容檢視、修改與刪除管理")
-                cd1, cd2, cd3 = st.columns(3)
-                with cd1:
-                    ct_det_m = st.selectbox("📅 篩選月份", ct_months, index=ct_months.index(sel_ct_month), key="ct_dm")
-                with cd2:
-                    ct_det_n = st.selectbox("👤 篩選同仁", ct_names, index=ct_names.index(sel_ct_name), key="ct_dn")
-                
-                ct_detail_df = df_ct.copy()
-                if ct_det_m != "全部月份":
-                    ct_detail_df = ct_detail_df[ct_detail_df["月份"] == ct_det_m]
-                if ct_det_n != "全部同仁":
-                    ct_detail_df = ct_detail_df[ct_detail_df["姓名"] == ct_det_n]
-
-                with cd3:
-                    ct_avail_dates = ["全部日期"] + sorted(ct_detail_df["回報日期"].unique().tolist(), reverse=True)
-                    ct_det_d = st.selectbox("📆 篩選特定日期", ct_avail_dates, key="ct_dd")
-                if ct_det_d != "全部日期":
-                    ct_detail_df = ct_detail_df[ct_detail_df["回報日期"] == ct_det_d]
-
-                if ct_detail_df.empty:
-                    st.info("🔍 此篩選條件下無符合的操台回報紀錄。")
-                else:
-                    ct_sorted = ct_detail_df.sort_values(by=["回報日期", "送出時間"], ascending=[False, False]).reset_index(drop=True)
-                    for idx, row in ct_sorted.iterrows():
-                        r_id = row.get("回報單號", f"ct_{idx}")
-                        has_ct_comp = str(row.get("直播中客訴", "無")).strip() not in ["無", ""]
-                        comp_tag = " 🚨【有直播客訴】" if has_ct_comp else ""
-                        img_tag = " 📸【附截圖】" if row.get("需求截圖檔名") else ""
-                        exp_title = f"📅 {row.get('回報日期', '')} ｜ 👤 {row.get('姓名', '')} ｜ 🕒 上下班：{row.get('上班時間', '')}~{row.get('下班時間', '')} (工時：{row.get('上班總時數(小時)', 0)}H) ｜ 🎥 直播台：{row.get('直播台名稱', '')} ｜ ⏱️ 操台：{row.get('操台時間', '')}{comp_tag}{img_tag}"
-
-                        is_editing_ct = (st.session_state.edit_report_id == r_id)
-                        with st.expander(exp_title, expanded=(idx == 0 or is_editing_ct)):
-                            c1, c2, c3, c4 = st.columns(4)
-                            c1.markdown(f"**🕒 上下班時間 (當日工時)**\n\n`{row.get('上班時間', '')} ~ {row.get('下班時間', '')}` (**{row.get('上班總時數(小時)', 0)}** 小時)")
-                            c2.markdown(f"**📱 工作機或賴名稱**\n\n`{row.get('工作機或賴名稱', '')}`")
-                            c3.markdown(f"**🎥 直播台名稱 / 粉專**\n\n**{row.get('直播台名稱', '')}**\n({row.get('直播台粉專網址', '')})")
-                            c4.markdown(f"**⏱️ 操台時間 / 互動數據**\n\n操台：`{row.get('操台時間', '')}` ({row.get('操台時數(小時)', 0)}H)\n數據：`{row.get('總留言_點讚_分享', '')}`")
-
-                            st.markdown("---")
-                            r_c1, r_c2 = st.columns(2)
-                            with r_c1:
-                                st.markdown("#### 📋 直播需求")
-                                st.write(row.get("直播需求", ""))
-                                if row.get("需求截圖編碼"):
-                                    b64_img = base64.b64decode(row["需求截圖編碼"])
-                                    st.download_button(
-                                        label=f"📸 下載直播需求截圖 ({row.get('需求截圖檔名', 'image.png')})",
-                                        data=b64_img,
-                                        file_name=f"{r_id}_{row.get('需求截圖檔名', 'image.png')}",
-                                        key=f"dl_ct_img_{r_id}"
-                                    )
-                            with r_c2:
-                                st.markdown("#### ✅ 直播需求是否達成")
-                                st.write(row.get("直播需求是否達成", ""))
-
-                            st.markdown("---")
-                            o_c1, o_c2 = st.columns(2)
-                            with o_c1:
-                                st.markdown("#### 🛠️ 操台外處理事項")
-                                st.write(row.get("操台外處理事項", ""))
-                            with o_c2:
-                                st.markdown("#### 🚨 直播中客訴")
-                                if has_ct_comp:
-                                    st.error(row.get("直播中客訴", ""))
-                                else:
-                                    st.caption("無")
-
-                            f_c1, f_c2 = st.columns(2)
-                            with f_c1:
-                                st.markdown("#### 💬 直播台整體操台感受")
-                                st.info(row.get("直播台整體操台感受", ""))
-                            with f_c2:
-                                st.markdown("#### 💡 提案改善 (主管專屬悄悄話)")
-                                st.warning(row.get("提案改善", "無"))
-
-                            st.markdown("---")
-                            fc1, fc2, fc3 = st.columns([2.5, 1.2, 1.3])
-                            fc1.caption(f"系統回報單號：{r_id} ｜ 實際送出時間 (台灣時間)：{row.get('送出時間', '')}")
-                            with fc2:
-                                if is_editing_ct:
-                                    if st.button("❌ 收合修改面板", key=f"close_ct_edit_{r_id}", use_container_width=True):
-                                        st.session_state.edit_report_id = None
-                                        st.rerun()
-                                else:
-                                    if st.button("✏️ 修改此筆操台回報", key=f"ct_edit_{r_id}", use_container_width=True):
-                                        st.session_state.edit_report_id = r_id
-                                        st.session_state.confirm_del_id = None
-                                        st.rerun()
-                            with fc3:
-                                if st.session_state.confirm_del_id == f"adm_ct_{r_id}":
-                                    dc1, dc2 = st.columns(2)
-                                    if dc1.button("✅ 確定", key=f"yes_ct_{r_id}", type="primary", use_container_width=True):
-                                        if delete_caotai_by_id(ws_caotai, ws_caotai_compact, r_id):
-                                            st.session_state.confirm_del_id = None
-                                            st.rerun()
-                                    if dc2.button("❌ 取消", key=f"no_ct_{r_id}", use_container_width=True):
-                                        st.session_state.confirm_del_id = None
-                                        st.rerun()
-                                else:
-                                    if st.button("🗑️ 刪除此筆操台回報", key=f"ct_del_{r_id}", use_container_width=True):
-                                        st.session_state.confirm_del_id = f"adm_ct_{r_id}"
-                                        st.session_state.edit_report_id = None
-                                        st.rerun()
-
-                            if is_editing_ct:
-                                st.markdown("---")
-                                with st.form(key=f"edit_ct_form_{r_id}"):
-                                    ec1, ec2, ec3, ec4 = st.columns(4)
-                                    with ec1:
-                                        ed_ct_date = st.date_input("📅 日期", parse_date_safe(row.get("回報日期", "")))
-                                    with ec2:
-                                        ed_ct_name = st.text_input("👤 姓名", value=str(row.get("姓名", "")))
-                                    with ec3:
-                                        ed_ct_ws = st.time_input("🕒 上班時間", parse_time_safe(row.get("上班時間", "13:00")), step=60)
-                                    with ec4:
-                                        ed_ct_we = st.time_input("🕕 下班時間", parse_time_safe(row.get("下班時間", "22:00")), step=60)
-
-                                    ec5, ec6, ec7 = st.columns(3)
-                                    with ec5:
-                                        ed_ct_dev = st.text_input("📱 工作機或賴名稱", value=str(row.get("工作機或賴名稱", "")))
-                                    with ec6:
-                                        ed_ct_sname = st.text_input("🎥 直播台名稱", value=str(row.get("直播台名稱", "")))
-                                    with ec7:
-                                        ed_ct_furl = st.text_input("🔗 直播台粉專網址", value=str(row.get("直播台粉專網址", "")))
-
-                                    ec8, ec9 = st.columns(2)
-                                    with ec8:
-                                        ed_ct_optime = st.text_input("⏱️ 操台時間", value=str(row.get("操台時間", "")))
-                                    with ec9:
-                                        ed_ct_metrics = st.text_input("📊 總留言量、總點讚、總分享", value=str(row.get("總留言_點讚_分享", "")))
-
-                                    ed_ct_req = st.text_area("📋 直播需求", value=str(row.get("直播需求", "")), height=70)
-                                    ed_ct_met = st.text_area("✅ 直播需求是否達成", value=str(row.get("直播需求是否達成", "")), height=60)
-                                    ed_ct_comp = st.text_area("🚨 直播中客訴", value=str(row.get("直播中客訴", "")), height=60)
-                                    ed_ct_other = st.text_area("🛠️ 操台外處理事項", value=str(row.get("操台外處理事項", "")), height=60)
-                                    ed_ct_feel = st.text_area("💬 直播台整體操台感受", value=str(row.get("直播台整體操台感受", "")), height=60)
-                                    ed_ct_prop = st.text_area("💡 提案改善", value=str(row.get("提案改善", "")), height=60)
-
-                                    save_ct_btn = st.form_submit_button("💾 儲存操台修改內容 (自動重算工時)", type="primary", use_container_width=True)
-
-                                if save_ct_btn:
-                                    with st.spinner("🔄 正在更新操台回報並重新計算工時..."):
-                                        new_w_m = calc_minutes(ed_ct_ws, ed_ct_we)
-                                        new_w_h = round(new_w_m / 60.0, 2)
-                                        new_op_h = parse_caotai_hours(ed_ct_optime)
-                                        clean_ct_d = normalize_date_str(ed_ct_date)
-
-                                        upd_ct_dict = {
-                                            "回報單號": r_id,
-                                            "送出時間": str(row.get("送出時間", "")),
-                                            "回報日期": clean_ct_d,
-                                            "帳號": str(row.get("帳號", "")),
-                                            "姓名": ed_ct_name.strip(),
-                                            "工作機或賴名稱": ed_ct_dev.strip(),
-                                            "上班時間": ed_ct_ws.strftime("%H:%M"),
-                                            "下班時間": ed_ct_we.strftime("%H:%M"),
-                                            "上班總分鐘": new_w_m,
-                                            "上班總時數(小時)": new_w_h,
-                                            "直播台名稱": ed_ct_sname.strip(),
-                                            "直播台粉專網址": ed_ct_furl.strip(),
-                                            "操台時間": ed_ct_optime.strip(),
-                                            "操台時數(小時)": new_op_h,
-                                            "總留言_點讚_分享": ed_ct_metrics.strip(),
-                                            "直播需求": ed_ct_req.strip(),
-                                            "直播需求是否達成": ed_ct_met.strip(),
-                                            "直播中客訴": ed_ct_comp.strip(),
-                                            "操台外處理事項": ed_ct_other.strip(),
-                                            "直播台整體操台感受": ed_ct_feel.strip(),
-                                            "提案改善": ed_ct_prop.strip(),
-                                            "需求截圖檔名": str(row.get("需求截圖檔名", "")),
-                                            "需求截圖編碼": str(row.get("需求截圖編碼", ""))
-                                        }
-
-                                        if write_dict_to_sheet(ws_caotai, CAOTAI_HEADERS, upd_ct_dict, target_report_id=r_id):
-                                            sync_caotai_pretty_sheet(ws_caotai, ws_caotai_compact)
-                                            clear_all_caches()
-                                            st.session_state.edit_report_id = None
-                                            st.rerun()
+                                    e_
