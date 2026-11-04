@@ -11,11 +11,12 @@ import string
 import io
 import base64
 import time
+import re
 import plotly.express as px
 from openpyxl.styles import Font, PatternFill, Alignment
 
 # 頁面基本設定
-st.set_page_config(page_title="黃金部門工作回報系統", layout="wide", page_icon="✨")
+st.set_page_config(page_title="企業雙部門工作回報系統", layout="wide", page_icon="✨")
 
 # 設定台灣標準時區 (UTC+8)
 TW_TZ = datetime.timezone(datetime.timedelta(hours=8))
@@ -26,7 +27,10 @@ def get_tw_now():
 def get_tw_today():
     return get_tw_now().date()
 
-# 標準中文標題列定義
+# ================= 標準中文標題列定義 =================
+USER_HEADERS = ["登入帳號", "密碼雜湊", "真實姓名", "綁定信箱", "系統權限", "建立時間", "所屬部門"]
+
+# 黃金部門標題
 REPORT_HEADERS = [
     "回報單號", "送出時間", "回報日期", "帳號", "姓名",
     "上班時間", "下班時間", 
@@ -36,11 +40,11 @@ REPORT_HEADERS = [
     "直播開始", "直播結束", "直播總分鐘",
     "有無客訴", "客訴_Who", "客訴_Where", "客訴_When", "客訴_What", "客訴_Why", "客訴_How",
     "有無8D", "8D檔名", "8D檔案編碼",
-    "今日處理事項", "提案改善", "對同仁想法"
+    "今日處理事項", "提案改善", "對同仁想法", "上班總分鐘"
 ]
 
 COMPACT_HEADERS = [
-    "回報日期", "姓名", "上下班時段", "包貨紀錄(時段/件數/單件耗時)", 
+    "回報日期", "姓名", "上下班時段(含工時)", "包貨紀錄(時段/件數/單件耗時)", 
     "寄貨件數", "客服紀錄(時段/時數)", "直播紀錄(時段/時數)", 
     "今日處理事項明細", "提案改善", "對同仁想法", "有無客訴", "回報單號"
 ]
@@ -51,7 +55,23 @@ COMPLAINT_HEADERS = [
     "6.解決與改善(How)", "有無附8D報告", "8D檔案名稱", "回報單號"
 ]
 
-# 英中欄位自動對應字典（防止舊版試算表標題對不上導致修改無效）
+# 操台部門標題
+CAOTAI_HEADERS = [
+    "回報單號", "送出時間", "回報日期", "帳號", "姓名",
+    "工作機或賴名稱", "上班時間", "下班時間", "上班總分鐘", "上班總時數(小時)",
+    "直播台名稱", "直播台粉專網址", "操台時間", "操台時數(小時)",
+    "總留言_點讚_分享", "直播需求", "直播需求是否達成",
+    "直播中客訴", "操台外處理事項", "直播台整體操台感受", "提案改善",
+    "需求截圖檔名", "需求截圖編碼"
+]
+
+CAOTAI_COMPACT_HEADERS = [
+    "回報日期", "姓名", "工作機/賴名稱", "上下班時間(當日工時)",
+    "直播台名稱", "操台時間(時數)", "留言/點讚/分享",
+    "直播需求", "是否達成", "直播中客訴", "操台外處理事項",
+    "整體操台感受", "提案改善", "回報單號"
+]
+
 EN_TO_ZH_MAP = {
     "report_id": "回報單號", "submit_time": "送出時間", "report_date": "回報日期",
     "username": "帳號", "name": "姓名", "work_start": "上班時間", "work_end": "下班時間",
@@ -67,7 +87,7 @@ EN_TO_ZH_MAP = {
     "username_u": "登入帳號", "password_hash": "密碼雜湊", "email": "綁定信箱", "role": "系統權限", "created_at": "建立時間"
 }
 
-# ================= 1. 輔助與安全函數 =================
+# ================= 1. 輔助與安全計算函數 =================
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -99,6 +119,22 @@ def calc_minutes_str(s1, s2):
     except:
         return 0
 
+def parse_caotai_hours(text):
+    """自動從操台時間文字（例如：21:06-23:33(2.5H) 或多台紀錄）解析出總操台小時數"""
+    if not text or str(text).strip() in ["無", ""]:
+        return 0.0
+    s = str(text)
+    # 1. 優先抓取括號內標註的 (2.5H) 或 (2.5小時)
+    h_matches = re.findall(r'[\(\（]\s*(\d+(?:\.\d+)?)\s*[hH小時]+[\)\）]', s)
+    if h_matches:
+        return round(sum(float(x) for x in h_matches), 2)
+    # 2. 若未寫括號時數，自動抓 21:06-23:33 時間區間計算
+    t_matches = re.findall(r'(\d{1,2}:\d{2})\s*[-~～至]\s*(\d{1,2}:\d{2})', s)
+    if t_matches:
+        total_m = sum(calc_minutes_str(t1, t2) for t1, t2 in t_matches)
+        return round(total_m / 60.0, 2)
+    return 0.0
+
 def parse_time_safe(t_str, default_time=datetime.time(9, 0)):
     try:
         if not t_str or str(t_str).strip() in ["無", ""]:
@@ -114,7 +150,6 @@ def parse_date_safe(d_str):
         return get_tw_today()
 
 def normalize_date_str(d_str):
-    """將任何格式的日期字串統一轉為 YYYY-MM-DD，確保折線圖橫軸排序永遠正確"""
     try:
         return pd.to_datetime(str(d_str).strip()).strftime("%Y-%m-%d")
     except:
@@ -141,7 +176,7 @@ def parse_vals_to_df(all_vals):
         df["回報日期"] = df["回報日期"].apply(normalize_date_str)
     return df
 
-# ================= 2. 極速資料庫連線與快取機制 =================
+# ================= 2. 資料庫連線與快取機制 =================
 def beautify_google_sheet(ws, num_cols):
     try:
         ws.freeze(rows=1)
@@ -186,17 +221,43 @@ def get_worksheets_cached():
     except:
         ws_comp = sh.add_worksheet(title="🚨 客訴與異常紀錄", rows="500", cols="12")
         ws_comp.append_row(COMPLAINT_HEADERS)
+
+    # 新增：操台部門底層資料表與美化總覽表
+    try:
+        ws_caotai = sh.worksheet("caotai_reports")
+    except:
+        ws_caotai = sh.add_worksheet(title="caotai_reports", rows="1000", cols="25")
+        ws_caotai.append_row(CAOTAI_HEADERS)
+        try:
+            ws_caotai.hide()
+        except:
+            pass
+
+    try:
+        ws_caotai_compact = sh.worksheet("🎛️ 操台作業總覽")
+    except:
+        ws_caotai_compact = sh.add_worksheet(title="🎛️ 操台作業總覽", rows="1000", cols="16")
+        ws_caotai_compact.append_row(CAOTAI_COMPACT_HEADERS)
+        beautify_google_sheet(ws_caotai_compact, len(CAOTAI_COMPACT_HEADERS))
         
-    return ws_users, ws_reports, ws_compact, ws_comp
+    return ws_users, ws_reports, ws_compact, ws_comp, ws_caotai, ws_caotai_compact
 
 @st.cache_data(ttl=180)
 def load_users_df():
-    ws_users, _, _, _ = get_worksheets_cached()
+    ws_users, _, _, _, _, _ = get_worksheets_cached()
     for attempt in range(3):
         try:
-            df = parse_vals_to_df(ws_users.get_all_values())
+            all_vals = ws_users.get_all_values()
+            if all_vals and len(all_vals[0]) < 7:
+                ws_users.update(raw=False, range_name="A1:G1", values=[USER_HEADERS])
+                all_vals[0] = USER_HEADERS
+            df = parse_vals_to_df(all_vals)
             if "帳號" in df.columns and "登入帳號" not in df.columns:
                 df.rename(columns={"帳號": "登入帳號", "姓名": "真實姓名"}, inplace=True)
+            if not df.empty and "所屬部門" not in df.columns:
+                df["所屬部門"] = "黃金部門"
+            elif not df.empty:
+                df["所屬部門"] = df["所屬部門"].apply(lambda x: x.strip() if str(x).strip() != "" else "黃金部門")
             return df
         except Exception as e:
             if attempt == 2:
@@ -205,7 +266,7 @@ def load_users_df():
 
 @st.cache_data(ttl=180)
 def load_reports_df():
-    _, ws_reports, _, _ = get_worksheets_cached()
+    _, ws_reports, _, _, _, _ = get_worksheets_cached()
     for attempt in range(3):
         try:
             return parse_vals_to_df(ws_reports.get_all_values())
@@ -214,38 +275,47 @@ def load_reports_df():
                 raise e
             time.sleep(1.5)
 
+@st.cache_data(ttl=180)
+def load_caotai_df():
+    _, _, _, _, ws_caotai, _ = get_worksheets_cached()
+    for attempt in range(3):
+        try:
+            return parse_vals_to_df(ws_caotai.get_all_values())
+        except Exception as e:
+            if attempt == 2:
+                raise e
+            time.sleep(1.5)
+
 def clear_all_caches():
     load_users_df.clear()
     load_reports_df.clear()
+    load_caotai_df.clear()
 
-def write_report_dict_to_sheet(ws_reports, data_dict, target_report_id=None):
-    """智慧欄位對位寫入：根據試算表當前的標題列順序精準寫入，徹底解決新舊欄位錯位問題"""
-    all_vals = ws_reports.get_all_values()
+def write_dict_to_sheet(ws, expected_headers, data_dict, target_report_id=None):
+    all_vals = ws.get_all_values()
     if not all_vals:
-        ws_reports.append_row(REPORT_HEADERS)
-        headers = REPORT_HEADERS
+        ws.append_row(expected_headers)
+        headers = expected_headers
     else:
         headers = [EN_TO_ZH_MAP.get(h.strip(), h.strip()) for h in all_vals[0]]
-        # 若試算表標題還是舊版 30 欄，自動在尾端補齊缺少的欄位標題
-        missing_cols = [h for h in REPORT_HEADERS if h not in headers]
+        missing_cols = [h for h in expected_headers if h not in headers]
         if missing_cols:
             headers = headers + missing_cols
             end_col_let = col_num_to_letter(len(headers))
-            ws_reports.update(raw=False, range_name=f"A1:{end_col_let}1", values=[headers])
+            ws.update(raw=False, range_name=f"A1:{end_col_let}1", values=[headers])
 
     row_to_write = [data_dict.get(h, "") for h in headers]
 
     if target_report_id is not None:
-        # 尋找單號所在列並精準覆蓋
         for idx in range(1, len(all_vals)):
             if len(all_vals[idx]) > 0 and str(all_vals[idx][0]).strip() == str(target_report_id).strip():
                 row_num = idx + 1
                 end_col_let = col_num_to_letter(len(headers))
-                ws_reports.update(raw=False, range_name=f"A{row_num}:{end_col_let}{row_num}", values=[row_to_write])
+                ws.update(raw=False, range_name=f"A{row_num}:{end_col_let}{row_num}", values=[row_to_write])
                 return True
         return False
     else:
-        ws_reports.append_row(row_to_write)
+        ws.append_row(row_to_write)
         return True
 
 def sync_pretty_sheets(ws_reports, ws_compact, ws_comp, apply_style=False):
@@ -257,6 +327,8 @@ def sync_pretty_sheets(ws_reports, ws_compact, ws_comp, apply_style=False):
     if not df.empty:
         df_sorted = df.sort_values(by=["回報日期", "送出時間"], ascending=[False, False])
         for _, r in df_sorted.iterrows():
+            w_min = calc_minutes_str(r.get("上班時間", "09:00"), r.get("下班時間", "18:00"))
+            w_hr = round(w_min / 60.0, 2)
             p_cnt = pd.to_numeric(r.get("包貨件數", 0), errors="coerce") or 0
             p_dur = pd.to_numeric(r.get("包貨總分鐘", 0), errors="coerce") or 0
             if p_dur <= 0 and p_cnt > 0:
@@ -277,7 +349,7 @@ def sync_pretty_sheets(ws_reports, ws_compact, ws_comp, apply_style=False):
             compact_rows.append([
                 str(r.get("回報日期", "")),
                 str(r.get("姓名", "")),
-                f"{r.get('上班時間', '')} ~ {r.get('下班時間', '')}",
+                f"{r.get('上班時間', '')} ~ {r.get('下班時間', '')}\n({w_hr}小時)",
                 pack_str,
                 str(r.get("寄貨件數", 0)),
                 cs_str,
@@ -313,6 +385,39 @@ def sync_pretty_sheets(ws_reports, ws_compact, ws_comp, apply_style=False):
         beautify_google_sheet(ws_compact, len(COMPACT_HEADERS))
         beautify_google_sheet(ws_comp, len(COMPLAINT_HEADERS))
 
+def sync_caotai_pretty_sheet(ws_caotai, ws_caotai_compact, apply_style=False):
+    all_vals = ws_caotai.get_all_values()
+    df = parse_vals_to_df(all_vals)
+    compact_rows = [CAOTAI_COMPACT_HEADERS]
+    
+    if not df.empty:
+        df_sorted = df.sort_values(by=["回報日期", "送出時間"], ascending=[False, False])
+        for _, r in df_sorted.iterrows():
+            w_min = calc_minutes_str(r.get("上班時間", ""), r.get("下班時間", ""))
+            w_hr = round(w_min / 60.0, 2)
+            ct_hr = r.get("操台時數(小時)", "") or parse_caotai_hours(r.get("操台時間", ""))
+            compact_rows.append([
+                str(r.get("回報日期", "")),
+                str(r.get("姓名", "")),
+                str(r.get("工作機或賴名稱", "")),
+                f"{r.get('上班時間', '')}~{r.get('下班時間', '')}\n({w_hr}小時)",
+                str(r.get("直播台名稱", "")),
+                f"{r.get('操台時間', '')}\n(共 {ct_hr} H)",
+                str(r.get("總留言_點讚_分享", "")),
+                str(r.get("直播需求", "")),
+                str(r.get("直播需求是否達成", "")),
+                str(r.get("直播中客訴", "")),
+                str(r.get("操台外處理事項", "")),
+                str(r.get("直播台整體操台感受", "")),
+                str(r.get("提案改善", "")),
+                str(r.get("回報單號", ""))
+            ])
+            
+    ws_caotai_compact.clear()
+    ws_caotai_compact.update(compact_rows)
+    if apply_style:
+        beautify_google_sheet(ws_caotai_compact, len(CAOTAI_COMPACT_HEADERS))
+
 def find_user_row_idx(ws_users, target_username):
     col_vals = ws_users.col_values(1)
     for idx, val in enumerate(col_vals):
@@ -332,14 +437,26 @@ def delete_report_by_id(ws_reports, ws_compact, ws_comp, target_report_id):
         clear_all_caches()
     return deleted
 
-def delete_existing_same_day_report(ws_reports, username, report_date_str):
-    all_vals = ws_reports.get_all_values()
+def delete_caotai_by_id(ws_caotai, ws_caotai_compact, target_report_id):
+    col_vals = ws_caotai.col_values(1)
+    deleted = False
+    for idx in range(len(col_vals) - 1, 0, -1):
+        if str(col_vals[idx]).strip() == str(target_report_id).strip():
+            ws_caotai.delete_rows(idx + 1)
+            deleted = True
+    if deleted:
+        sync_caotai_pretty_sheet(ws_caotai, ws_caotai_compact)
+        clear_all_caches()
+    return deleted
+
+def delete_existing_same_day_report(ws, username, report_date_str):
+    all_vals = ws.get_all_values()
     overwritten = False
     target_d = normalize_date_str(report_date_str)
     for idx in range(len(all_vals) - 1, 0, -1):
         r = all_vals[idx]
         if len(r) >= 4 and normalize_date_str(r[2]) == target_d and str(r[3]).strip() == str(username).strip():
-            ws_reports.delete_rows(idx + 1)
+            ws.delete_rows(idx + 1)
             overwritten = True
     return overwritten
 
@@ -380,8 +497,8 @@ def send_reset_email(receiver_email, new_pass):
         sender_email = st.secrets["smtp"]["sender_email"]
         sender_password = st.secrets["smtp"]["app_password"]
 
-        msg = MIMEText(f"您好，\n\n您的「黃金部門工作回報系統」密碼已重設。\n您的臨時新密碼為：{new_pass}\n\n請使用此密碼登入後，立即至左側選單「修改密碼」更新您的密碼。", "plain", "utf-8")
-        msg["Subject"] = "【系統通知】黃金部門工作回報系統 - 密碼重設"
+        msg = MIMEText(f"您好，\n\n您的「工作回報系統」密碼已重設。\n您的臨時新密碼為：{new_pass}\n\n請使用此密碼登入後，立即至左側選單「修改密碼」更新您的密碼。", "plain", "utf-8")
+        msg["Subject"] = "【系統通知】每日工作回報系統 - 密碼重設"
         msg["From"] = sender_email
         msg["To"] = receiver_email
 
@@ -426,18 +543,19 @@ if not st.session_state.logged_in:
                         "password_hash": urow["密碼雜湊"],
                         "name": urow["真實姓名"],
                         "email": urow["綁定信箱"],
-                        "role": urow["系統權限"]
+                        "role": urow["系統權限"],
+                        "dept": urow.get("所屬部門", "黃金部門")
                     }
         except:
             pass
 
 # ================= 4. 未登入畫面 =================
 if not st.session_state.logged_in:
-    st.title("✨ 黃金部門工作回報系統")
+    st.title("✨ 企業雙部門工作回報系統（黃金部門 ＆ 操台部門）")
     tab1, tab2, tab3 = st.tabs(["🔑 登入系統", "📝 新人註冊", "❓ 忘記密碼"])
     
     with tab1:
-        st.subheader("員工/管理員登入")
+        st.subheader("員工 / 管理員登入")
         with st.form("login_form"):
             login_user = st.text_input("帳號")
             login_pass = st.text_input("密碼", type="password")
@@ -455,7 +573,8 @@ if not st.session_state.logged_in:
                             "password_hash": user_row["密碼雜湊"],
                             "name": user_row["真實姓名"],
                             "email": user_row["綁定信箱"],
-                            "role": user_row["系統權限"]
+                            "role": user_row["系統權限"],
+                            "dept": user_row.get("所屬部門", "黃金部門")
                         }
                         st.query_params["u"] = user_row["登入帳號"]
                         st.query_params["t"] = make_auth_token(user_row["登入帳號"], user_row["密碼雜湊"])
@@ -468,6 +587,7 @@ if not st.session_state.logged_in:
     with tab2:
         st.subheader("註冊新帳號")
         with st.form("register_form"):
+            reg_dept = st.selectbox("請選擇您的所屬部門", ["黃金部門", "操台部門", "跨部門(兩部門皆可填寫)"])
             reg_name = st.text_input("真實姓名 (將自動綁定未來的回報單)")
             reg_email = st.text_input("常用信箱 (忘記密碼寄信用，請務必填寫正確)")
             reg_user = st.text_input("設定登入帳號")
@@ -482,16 +602,17 @@ if not st.session_state.logged_in:
                 st.error("❌ 兩次輸入的密碼不一致，請重新確認！")
             else:
                 with st.spinner("🔄 正在建立您的帳號..."):
-                    ws_users, _, _, _ = get_worksheets_cached()
+                    ws_users, _, _, _, _, _ = get_worksheets_cached()
                     users_df = load_users_df()
                     if not users_df.empty and reg_user.strip() in users_df["登入帳號"].values:
                         st.error("❌ 此帳號已被註冊，請換一個！")
                     else:
                         ws_users.append_row([
-                            reg_user.strip(), hash_password(reg_pass1.strip()), reg_name.strip(), reg_email.strip(), "staff", get_tw_now().strftime("%Y-%m-%d %H:%M:%S")
+                            reg_user.strip(), hash_password(reg_pass1.strip()), reg_name.strip(),
+                            reg_email.strip(), "staff", get_tw_now().strftime("%Y-%m-%d %H:%M:%S"), reg_dept
                         ])
                         clear_all_caches()
-                        st.success("✅ 註冊成功！請切換至左上角「🔑 登入系統」分頁進行登入。")
+                        st.success(f"✅ 註冊成功（所屬部門：{reg_dept}）！請切換至左上角「🔑 登入系統」分頁進行登入。")
 
     with tab3:
         st.subheader("忘記密碼 / 重新寄送臨時密碼")
@@ -502,7 +623,7 @@ if not st.session_state.logged_in:
             
         if fp_submit:
             with st.spinner("🔄 正在驗證信箱並發送郵件..."):
-                ws_users, _, _, _ = get_worksheets_cached()
+                ws_users, _, _, _, _, _ = get_worksheets_cached()
                 users_df = load_users_df()
                 if not users_df.empty:
                     match = users_df[(users_df["登入帳號"] == fp_user.strip()) & (users_df["綁定信箱"] == fp_email.strip())]
@@ -522,20 +643,30 @@ if not st.session_state.logged_in:
 # ================= 5. 已登入畫面 =================
 else:
     try:
-        ws_users, ws_reports, ws_compact, ws_comp = get_worksheets_cached()
+        ws_users, ws_reports, ws_compact, ws_comp, ws_caotai, ws_caotai_compact = get_worksheets_cached()
     except Exception as e:
         st.warning("⏳ 系統正在冷卻連線頻率，請等待約 10 秒後按 F5 重新整理網頁（您的登入狀態已鎖定保護，不會被登出）！")
         st.stop()
 
     user = st.session_state.user_info
+    user_dept = user.get("dept", "黃金部門")
+    if user["role"] == "admin":
+        user_dept = "跨部門(兩部門皆可填寫)"
+
     st.sidebar.title(f"👋 您好，{user['name']}")
-    st.sidebar.caption(f"身份：{'👑 管理員' if user['role'] == 'admin' else '👤 部門同仁'}")
+    st.sidebar.caption(f"身份：{'👑 管理員' if user['role'] == 'admin' else f'👤 {user_dept}'}")
     st.sidebar.caption(f"🕒 台灣時間：{get_tw_now().strftime('%Y-%m-%d %H:%M')}")
     st.sidebar.success("🔒 防掉線保護已啟動（重整不登出）")
     
-    menu_options = ["📝 每日工作回報", "🔒 修改密碼"]
+    # 根據部門動態組合左側選單
+    menu_options = []
     if user["role"] == "admin":
-        menu_options = ["📊 主管後台數據中心", "👥 帳號與權限管理", "📝 每日工作回報", "🔒 修改密碼"]
+        menu_options.extend(["📊 主管後台數據中心", "👥 帳號與權限管理"])
+    if user_dept in ["黃金部門", "跨部門(兩部門皆可填寫)"]:
+        menu_options.append("📝 黃金部門 - 每日工作回報")
+    if user_dept in ["操台部門", "跨部門(兩部門皆可填寫)"]:
+        menu_options.append("🎛️ 操台部門 - 每日工作回報")
+    menu_options.append("🔒 修改密碼")
         
     choice = st.sidebar.radio("功能選單", menu_options)
     
@@ -545,21 +676,22 @@ else:
         st.query_params.clear()
         st.rerun()
 
-    # ---------------- 功能 A：每日工作回報 ----------------
-    if choice == "📝 每日工作回報":
-        st.title("📝 黃金部門 - 每日工作回報單")
+    # =========================================================================
+    # ---------------- 功能 A1：黃金部門 - 每日工作回報 ----------------
+    # =========================================================================
+    if choice == "📝 黃金部門 - 每日工作回報":
+        st.title("✨ 黃金部門 - 每日工作回報單")
         
         if st.session_state.submit_success_msg:
             st.balloons()
             st.success(st.session_state.submit_success_msg)
             st.session_state.submit_success_msg = ""
 
-        st.info(f"📌 填表人：**{user['name']}** ｜ 🛡️ **防消失升級**：目前已開啟「穩定填表模式」，調整時間與打字時網頁**不會閃爍刷新**，且登入狀態已鎖定，請安心填寫！")
+        st.info(f"📌 填表人：**{user['name']}** ｜ 🛡️ **防消失升級**：目前已開啟「穩定填表模式」，調整時間與打字時網頁**不會閃爍刷新**，且系統會自動計算您的當日上班時數！")
         
         fv = st.session_state.form_ver
         
         st.markdown("### 📌 步驟一：請先勾選今日有執行的作業項目")
-        st.caption("（有執行的打勾即可，下方填表區在您打字與調整時間時，完全不會刷新畫面！）")
         chk_c1, chk_c2, chk_c3, chk_c4, chk_c5, chk_c6 = st.columns(6)
         with chk_c1:
             has_pack = st.checkbox("📦 今日有包貨", key=f"hp_{fv}")
@@ -652,7 +784,7 @@ else:
 
             st.divider()
             st.markdown("#### 三、 今日處理事項明細")
-            st.caption("請填寫幾點幾分到幾點幾分做了哪些事（空白未填的列會自動忽略，不夠可在上方點『➕ 增加處理事項欄位』）")
+            st.caption("請填寫幾點幾分到幾點幾分做了哪些事（空白未填的列會自動忽略）")
             
             raw_tasks_inputs = []
             for i in range(st.session_state.task_rows):
@@ -672,7 +804,7 @@ else:
             improvement_proposal = st.text_area("💡 提案改善欄位 (針對作業流程、商品、工具有任何優化建議皆可提出)")
             peer_feedback = st.text_area("🤝 針對其他同仁有任何想法或建議 (僅主管後台可見)")
 
-            submit_btn = st.form_submit_button("🚀 確認無誤，送出今日回報", type="primary", use_container_width=True)
+            submit_btn = st.form_submit_button("🚀 確認無誤，送出黃金部門今日回報", type="primary", use_container_width=True)
 
         if submit_btn:
             tasks_list = []
@@ -687,13 +819,14 @@ else:
                 file_8d_b64 = base64.b64encode(uploaded_8d.read()).decode("utf-8")
 
             if has_complaint == "有" and not all([c_who.strip(), c_when.strip(), c_what.strip(), c_why.strip(), c_how.strip()]):
-                st.error("❌ 您勾選了「今日有客訴」，請將 Who / When / What / Why / How 所有欄位填寫完整！（您剛剛填寫的文字都還保留在上方格子內，補齊後再按送出即可）")
+                st.error("❌ 您勾選了「今日有客訴」，請將 Who / When / What / Why / How 所有欄位填寫完整！")
             elif has_8d and not file_8d_name:
                 st.error("❌ 您勾選了「需附 8D 檔案」，請務必選擇檔案上傳！")
             elif not tasks_list:
-                st.error("❌ 請至少填寫一條「今日處理事項」！（填寫後再按送出即可）")
+                st.error("❌ 請至少填寫一條「今日處理事項」！")
             else:
                 with st.spinner("🚀 正在安全傳送您的回報資料..."):
+                    work_duration = calc_minutes(work_start, work_end)
                     pack_start_str = pack_start.strftime("%H:%M") if has_pack else "無"
                     pack_end_str = pack_end.strftime("%H:%M") if has_pack else "無"
                     pack_duration = calc_minutes(pack_start, pack_end) if has_pack else 0
@@ -721,6 +854,7 @@ else:
                         "姓名": user["name"],
                         "上班時間": work_start.strftime("%H:%M"),
                         "下班時間": work_end.strftime("%H:%M"),
+                        "上班總分鐘": work_duration,
                         "包貨開始": pack_start_str,
                         "包貨結束": pack_end_str,
                         "包貨件數": pack_count if has_pack else 0,
@@ -744,21 +878,21 @@ else:
                         "對同仁想法": peer_feedback
                     }
                     
-                    write_report_dict_to_sheet(ws_reports, new_data_dict, target_report_id=None)
+                    write_dict_to_sheet(ws_reports, REPORT_HEADERS, new_data_dict, target_report_id=None)
                     sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
                     clear_all_caches()
                     
                     st.session_state.task_rows = 3
                     st.session_state.form_ver += 1
+                    w_hr_disp = round(work_duration / 60.0, 2)
                     if was_overwritten:
-                        st.session_state.submit_success_msg = f"✅ 【覆蓋成功】您於 {clean_rdate} 的舊回報已自動刪除，並更新為最新送出的內容（送出時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}）！下方表單已自動清空。"
+                        st.session_state.submit_success_msg = f"✅ 【覆蓋成功】您於 {clean_rdate} 的黃金部門回報已更新（當日上班時數：{w_hr_disp} 小時）！"
                     else:
-                        st.session_state.submit_success_msg = f"🎉 【送出成功】您於 {clean_rdate} 的工作回報已成功送出（送出時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}）！下方表單已自動清空。"
+                        st.session_state.submit_success_msg = f"🎉 【送出成功】您於 {clean_rdate} 的黃金部門回報已送出（當日上班時數：{w_hr_disp} 小時）！"
                     st.rerun()
 
-        # 同仁自行撤回近期回報紀錄
         st.divider()
-        with st.expander("🗂️ 檢視 / 撤回我近期已送出的回報紀錄"):
+        with st.expander("🗂️ 檢視 / 撤回我近期已送出的黃金部門回報"):
             df_check = load_reports_df()
             if not df_check.empty:
                 my_df = df_check[df_check["帳號"] == user["username"]].sort_values(by=["回報日期", "送出時間"], ascending=[False, False]).head(10)
@@ -766,16 +900,13 @@ else:
                     for _, mrow in my_df.iterrows():
                         m_id = mrow["回報單號"]
                         mc1, mc2 = st.columns([4, 2])
-                        mc1.markdown(f"**📅 日期：{mrow['回報日期']}** ｜ 送出時間：`{mrow['送出時間']}` ｜ 包貨：{mrow['包貨件數']}件 / 寄貨：{mrow['寄貨件數']}件 ｜ 事項：{str(mrow['今日處理事項'])[:30]}...")
-                        
+                        mc1.markdown(f"**📅 日期：{mrow['回報日期']}** ｜ 上下班：`{mrow['上班時間']}~{mrow['下班時間']}` ｜ 包貨：{mrow['包貨件數']}件 / 寄貨：{mrow['寄貨件數']}件")
                         with mc2:
                             if st.session_state.confirm_del_id == f"self_{m_id}":
-                                st.warning(f"⚠️ 確定要撤回刪除 {mrow['回報日期']} 的回報嗎？")
                                 sc1, sc2 = st.columns(2)
                                 if sc1.button("✅ 確定刪除", key=f"yes_self_{m_id}", type="primary", use_container_width=True):
                                     delete_report_by_id(ws_reports, ws_compact, ws_comp, m_id)
                                     st.session_state.confirm_del_id = None
-                                    st.success(f"✅ 已成功刪除您於 {mrow['回報日期']} 的回報紀錄！")
                                     st.rerun()
                                 if sc2.button("❌ 取消", key=f"no_self_{m_id}", use_container_width=True):
                                     st.session_state.confirm_del_id = None
@@ -784,12 +915,192 @@ else:
                                 if st.button("🗑️ 撤回刪除", key=f"self_del_{m_id}", use_container_width=True):
                                     st.session_state.confirm_del_id = f"self_{m_id}"
                                     st.rerun()
-                else:
-                    st.caption("您目前尚無任何已送出的回報紀錄。")
-            else:
-                st.caption("目前尚無任何已送出的回報紀錄。")
 
+    # =========================================================================
+    # ---------------- 功能 A2：操台部門 - 每日工作回報 ----------------
+    # =========================================================================
+    elif choice == "🎛️ 操台部門 - 每日工作回報":
+        st.title("🎛️ 操台部門 - 每日工作回報單")
+        
+        if st.session_state.submit_success_msg:
+            st.balloons()
+            st.success(st.session_state.submit_success_msg)
+            st.session_state.submit_success_msg = ""
+
+        st.info(f"📌 填表人：**{user['name']}** （已自動綁定姓名） ｜ ⏱️ 系統將根據您的上下班時間與操台時間，**自動計算當日與當月累計上班時數**！")
+        
+        fv = st.session_state.form_ver
+        with st.form(key=f"caotai_report_form_{fv}", clear_on_submit=False):
+            st.markdown("### 一、 出勤時間與工作設備")
+            ct_col1, ct_col2 = st.columns(2)
+            with ct_col1:
+                ct_date = st.date_input("📅 日期 *", get_tw_today())
+            with ct_col2:
+                ct_device = st.text_input("📱 工作機或賴名稱 *", placeholder="遠端人員無工作機填寫私人賴名稱")
+                st.caption("遠端人員無工作機填寫私人賴名稱")
+
+            t_c1, t_c2 = st.columns(2)
+            with t_c1:
+                ct_ws = st.time_input("🕒 上班時間 *", datetime.time(13, 0), step=60)
+                st.caption("⚠️ 不可湊整，請務必與打卡紙上相同 (遠端人員請務必與上機時間相同)")
+            with t_c2:
+                ct_we = st.time_input("🕕 下班時間 *", datetime.time(22, 0), step=60)
+                st.caption("⚠️ 不可湊整，請務必與打卡紙上相同 (遠端人員請務必與下機時間相同)")
+
+            st.divider()
+            st.markdown("### 二、 直播操台數據與需求紀錄")
+            s_c1, s_c2 = st.columns(2)
+            with s_c1:
+                ct_stream_name = st.text_input("🎥 直播台名稱 *", placeholder="請輸入直播台名稱")
+            with s_c2:
+                ct_fanpage_url = st.text_input("🔗 直播台粉專網址 *", placeholder="如果有兩台請備註直播台對應粉專")
+                st.caption("如果有兩台請備註直播台對應粉專")
+
+            m_c1, m_c2 = st.columns(2)
+            with m_c1:
+                ct_op_time = st.text_input("⏱️ 操台時間 *", placeholder="格式範例：21:06-23:33(2.5H)")
+                st.caption("格式範例：21:06-23:33(2.5H)，如果有兩台請備註直播台對應時間")
+            with m_c2:
+                ct_metrics = st.text_input("📊 總留言量、總點讚、總分享 *", placeholder="格式：廣天-8553-523-325")
+                st.caption("有多個直播台請備註各自數量 (格式：廣天-8553-523-325)")
+
+            ct_req = st.text_area(
+                "📋 直播需求 *",
+                placeholder="請詳細說明直播需求，禁止只打加單關鍵字反饋互動；如果有不同直播台請分開備註...",
+                height=100
+            )
+            st.caption("請詳細說明直播需求禁止只打加單關鍵字反饋互動，如果每日工作回報內台性那需要調整，就直接協助新增並附上截圖。如果有不同直播台請分開備註")
+            ct_req_img = st.file_uploader("📸 附上直播需求調整截圖 (選填，支援圖片或PDF)", type=["png", "jpg", "jpeg", "pdf"])
+
+            ct_req_met = st.text_area(
+                "✅ 直播需求是否達成 *",
+                placeholder="請依上題所述需求詳細說明，如未達成請詳述原因...",
+                height=80
+            )
+            st.caption("請依上題所述需求詳細說明，如未達成請詳述原因")
+
+            st.divider()
+            st.markdown("### 三、 客訴、操台外事項與心得提案")
+            ct_complaint = st.text_area(
+                "🚨 直播中客訴 *",
+                placeholder="有客訴請詳細說明客訴原因，處理方式，是否處理完成，客訴最終處理結果。無客訴直接打無",
+                height=80
+            )
+            st.caption("有客訴請詳細說明客訴原因，處理方式，是否處理完成，客訴最終處理結果｜無客訴直接打無｜如果有不同直播台請分開備註")
+
+            ct_other_tasks = st.text_area(
+                "🛠️ 操台外處理事項 *",
+                placeholder="請依照上班時間軸詳細敘述。遠端人員若無提供操台外協助請直接打無",
+                height=90
+            )
+            st.caption("請依照上班時間軸詳細敘述｜遠端人員若無提供操台外協助請直接打無")
+
+            ct_feeling = st.text_area(
+                "💬 直播台整體操台感受 *",
+                placeholder="請詳述整體節奏、客人加單狀況、客人互動狀況、直播客人熱絡度等等，有任何想法都直接打上來尤其是自己的台",
+                height=90
+            )
+            st.caption("請詳述整體節奏、客人加單狀況、客人互動狀況、直播客人熱絡度等等，有任何想法都直接打上來尤其是自己的台")
+
+            ct_proposal = st.text_area(
+                "💡 提案改善",
+                placeholder="請提供可以調整的地方，或是建議，也可以在這邊跟我們聊聊天說說話釋放壓力（這邊只有主管看得到呦~~~ 如果無也可以打無）",
+                height=90
+            )
+            st.caption("請提供可以調整的地方，或是建議，也可以在這邊跟我們聊聊天說說話釋放壓力｜這邊只有主管看得到呦~~~ 如果無也可以打無")
+
+            ct_submit = st.form_submit_button("🚀 確認無誤，送出操台部門今日回報", type="primary", use_container_width=True)
+
+        if ct_submit:
+            required_fields = [
+                ct_device.strip(), ct_stream_name.strip(), ct_fanpage_url.strip(),
+                ct_op_time.strip(), ct_metrics.strip(), ct_req.strip(),
+                ct_req_met.strip(), ct_complaint.strip(), ct_other_tasks.strip(), ct_feeling.strip()
+            ]
+            if not all(required_fields):
+                st.error("❌ 標註「*」號的題目皆為必填！（若無客訴或無操台外事項，請在框內輸入『無』，您剛才打的字都還保留在上方框內，補齊後再按送出即可）")
+            else:
+                with st.spinner("🚀 正在安全傳送您的操台回報資料..."):
+                    work_min = calc_minutes(ct_ws, ct_we)
+                    work_hr = round(work_min / 60.0, 2)
+                    op_hr = parse_caotai_hours(ct_op_time)
+
+                    img_name, img_b64 = "", ""
+                    if ct_req_img is not None:
+                        img_name = ct_req_img.name
+                        img_b64 = base64.b64encode(ct_req_img.read()).decode("utf-8")
+
+                    clean_cdate = normalize_date_str(ct_date)
+                    was_overwritten = delete_existing_same_day_report(ws_caotai, user["username"], clean_cdate)
+                    
+                    now_tw = get_tw_now()
+                    report_id = "CT_" + now_tw.strftime("%Y%m%d%H%M%S") + "_" + user["username"]
+
+                    caotai_dict = {
+                        "回報單號": report_id,
+                        "送出時間": now_tw.strftime("%Y-%m-%d %H:%M:%S"),
+                        "回報日期": clean_cdate,
+                        "帳號": user["username"],
+                        "姓名": user["name"],
+                        "工作機或賴名稱": ct_device.strip(),
+                        "上班時間": ct_ws.strftime("%H:%M"),
+                        "下班時間": ct_we.strftime("%H:%M"),
+                        "上班總分鐘": work_min,
+                        "上班總時數(小時)": work_hr,
+                        "直播台名稱": ct_stream_name.strip(),
+                        "直播台粉專網址": ct_fanpage_url.strip(),
+                        "操台時間": ct_op_time.strip(),
+                        "操台時數(小時)": op_hr,
+                        "總留言_點讚_分享": ct_metrics.strip(),
+                        "直播需求": ct_req.strip(),
+                        "直播需求是否達成": ct_req_met.strip(),
+                        "直播中客訴": ct_complaint.strip(),
+                        "操台外處理事項": ct_other_tasks.strip(),
+                        "直播台整體操台感受": ct_feeling.strip(),
+                        "提案改善": ct_proposal.strip() or "無",
+                        "需求截圖檔名": img_name,
+                        "需求截圖編碼": img_b64
+                    }
+
+                    write_dict_to_sheet(ws_caotai, CAOTAI_HEADERS, caotai_dict, target_report_id=None)
+                    sync_caotai_pretty_sheet(ws_caotai, ws_caotai_compact)
+                    clear_all_caches()
+
+                    st.session_state.form_ver += 1
+                    if was_overwritten:
+                        st.session_state.submit_success_msg = f"✅ 【覆蓋成功】您於 {clean_cdate} 的操台回報已更新（當日上班時數：{work_hr} 小時 / 操台時數：{op_hr} 小時）！"
+                    else:
+                        st.session_state.submit_success_msg = f"🎉 【送出成功】您於 {clean_cdate} 的操台回報已送出（當日上班時數：{work_hr} 小時 / 操台時數：{op_hr} 小時）！"
+                    st.rerun()
+
+        st.divider()
+        with st.expander("🗂️ 檢視 / 撤回我近期已送出的操台部門回報"):
+            df_ct_check = load_caotai_df()
+            if not df_ct_check.empty:
+                my_ct_df = df_ct_check[df_ct_check["帳號"] == user["username"]].sort_values(by=["回報日期", "送出時間"], ascending=[False, False]).head(10)
+                if not my_ct_df.empty:
+                    for _, mrow in my_ct_df.iterrows():
+                        m_id = mrow["回報單號"]
+                        mc1, mc2 = st.columns([4, 2])
+                        mc1.markdown(f"**📅 日期：{mrow['回報日期']}** ｜ 上下班：`{mrow['上班時間']}~{mrow['下班時間']}` ({mrow.get('上班總時數(小時)', '')}H) ｜ 直播台：{mrow['直播台名稱']}")
+                        with mc2:
+                            if st.session_state.confirm_del_id == f"self_ct_{m_id}":
+                                sc1, sc2 = st.columns(2)
+                                if sc1.button("✅ 確定刪除", key=f"yes_sct_{m_id}", type="primary", use_container_width=True):
+                                    delete_caotai_by_id(ws_caotai, ws_caotai_compact, m_id)
+                                    st.session_state.confirm_del_id = None
+                                    st.rerun()
+                                if sc2.button("❌ 取消", key=f"no_sct_{m_id}", use_container_width=True):
+                                    st.session_state.confirm_del_id = None
+                                    st.rerun()
+                            else:
+                                if st.button("🗑️ 撤回刪除", key=f"self_ct_del_{m_id}", use_container_width=True):
+                                    st.session_state.confirm_del_id = f"self_ct_{m_id}"
+                                    st.rerun()
+
+    # =========================================================================
     # ---------------- 功能 B：修改密碼 ----------------
+    # =========================================================================
     elif choice == "🔒 修改密碼":
         st.title("🔒 修改個人密碼")
         with st.form("change_pw_form"):
@@ -813,16 +1124,18 @@ else:
                     st.query_params["t"] = make_auth_token(user["username"], new_hash)
                     st.success("✅ 密碼更新成功！")
 
-    # ---------------- 功能 C：帳號與權限管理 ----------------
+    # =========================================================================
+    # ---------------- 功能 C：帳號與權限管理 (含部門指派) ----------------
+    # =========================================================================
     elif choice == "👥 帳號與權限管理" and user["role"] == "admin":
-        st.title("👥 部門帳號與權限管理中心")
+        st.title("👥 雙部門帳號、部門歸屬與權限管理中心")
         users_df = load_users_df()
         
         st.subheader("📋 目前已註冊帳號總覽")
         if not users_df.empty:
             display_users = users_df.copy()
             display_users["目前權限"] = display_users["系統權限"].apply(lambda r: "👑 管理員 (admin)" if r == "admin" else "👤 一般同仁 (staff)")
-            st.dataframe(display_users[["登入帳號", "真實姓名", "綁定信箱", "目前權限", "建立時間"]], use_container_width=True)
+            st.dataframe(display_users[["登入帳號", "真實姓名", "所屬部門", "綁定信箱", "目前權限", "建立時間"]], use_container_width=True)
         else:
             st.info("目前尚無帳號資料。")
 
@@ -830,33 +1143,40 @@ else:
         col_m1, col_m2 = st.columns(2)
         
         with col_m1:
-            st.subheader("🛡️ 調整現有帳號權限 / 重設密碼")
+            st.subheader("🛡️ 調整現有帳號部門 / 權限 / 密碼")
             if not users_df.empty:
-                user_options = [f"{r['真實姓名']} (帳號: {r['登入帳號']} | 權限: {r['系統權限']})" for _, r in users_df.iterrows()]
+                user_options = [f"{r['真實姓名']} (部門: {r.get('所屬部門','黃金部門')} | 帳號: {r['登入帳號']} | 權限: {r['系統權限']})" for _, r in users_df.iterrows()]
                 selected_opt = st.selectbox("請選擇要操作的帳號", user_options)
                 target_idx = user_options.index(selected_opt)
                 target_row = users_df.iloc[target_idx]
                 target_uname = target_row["登入帳號"]
                 
-                st.markdown("##### 1️⃣ 變更系統權限")
+                st.markdown("##### 1️⃣ 變更所屬部門與系統權限")
+                dept_list = ["黃金部門", "操台部門", "跨部門(兩部門皆可填寫)"]
+                curr_dept = target_row.get("所屬部門", "黃金部門")
+                d_idx = dept_list.index(curr_dept) if curr_dept in dept_list else 0
+                new_dept = st.selectbox("調整所屬部門：", dept_list, index=d_idx)
+                
                 new_role = st.radio(
                     "選擇賦予該帳號的權限等級：",
                     ["staff", "admin"],
                     index=0 if target_row["系統權限"] == "staff" else 1,
-                    format_func=lambda x: "👤 一般同仁 (僅可填寫每日回報)" if x == "staff" else "👑 管理員 (可查看數據後台 & 管理所有帳號)",
+                    format_func=lambda x: "👤 一般同仁 (僅可填寫所屬部門回報)" if x == "staff" else "👑 管理員 (可查看雙部門後台 & 管理所有帳號)",
                     horizontal=True
                 )
-                if st.button("💾 儲存權限變更", type="primary"):
+                if st.button("💾 儲存部門與權限變更", type="primary"):
                     if target_uname == "admin" and new_role != "admin":
                         st.error("❌ 系統保護機制：預設最高管理員 `admin` 不可降級為一般同仁！")
                     else:
                         sheet_row = find_user_row_idx(ws_users, target_uname)
                         if sheet_row:
                             ws_users.update_cell(sheet_row, 5, new_role)
+                            ws_users.update_cell(sheet_row, 7, new_dept)
                             clear_all_caches()
                             if target_uname == user["username"]:
                                 st.session_state.user_info["role"] = new_role
-                            st.success(f"✅ 已將 **{target_row['真實姓名']}** 的權限更新為：`{new_role}`！")
+                                st.session_state.user_info["dept"] = new_dept
+                            st.success(f"✅ 已將 **{target_row['真實姓名']}** 更新為：部門 `{new_dept}` / 權限 `{new_role}`！")
                             st.rerun()
                             
                 st.markdown("---")
@@ -888,7 +1208,7 @@ else:
 
         with col_m2:
             st.subheader("➕ 由後台直接幫同仁建立帳號")
-            st.caption("您可以先幫同仁建好帳號與預設密碼，同仁登入後可自行修改密碼。")
+            adm_dept = st.selectbox("選擇該同仁所屬部門", ["黃金部門", "操台部門", "跨部門(兩部門皆可填寫)"], key="a_dept")
             adm_name = st.text_input("同仁真實姓名 (將綁定回報單)", key="a_name")
             adm_email = st.text_input("同仁常用信箱 (供未來忘記密碼收信用)", key="a_email")
             adm_user = st.text_input("設定登入帳號", key="a_user")
@@ -910,569 +1230,834 @@ else:
                         adm_name.strip(),
                         adm_email.strip(),
                         adm_role,
-                        get_tw_now().strftime("%Y-%m-%d %H:%M:%S")
+                        get_tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+                        adm_dept
                     ])
                     clear_all_caches()
-                    st.success(f"✅ 已成功建立 **{adm_name}** 的帳號！預設密碼為：`{adm_pass.strip()}`")
+                    st.success(f"✅ 已成功建立 **{adm_name}** ({adm_dept}) 的帳號！預設密碼為：`{adm_pass.strip()}`")
                     st.rerun()
 
-    # ---------------- 功能 D：主管後台數據中心 ----------------
+    # =========================================================================
+    # ---------------- 功能 D：主管後台數據中心 (雙部門切換) ----------------
+    # =========================================================================
     elif choice == "📊 主管後台數據中心" and user["role"] == "admin":
         top_c1, top_c2 = st.columns([3.5, 1.2])
         with top_c1:
-            st.title("📊 黃金部門 - 主管後台數據中心")
+            st.title("📊 主管後台數據中心（黃金部門 ＆ 操台部門）")
         with top_c2:
             st.write("")
             if st.button("🔄 立即刷新最新數據與圖表", use_container_width=True):
                 clear_all_caches()
                 st.rerun()
-        
-        df = load_reports_df()
-        if df.empty:
-            st.info("目前尚無任何同仁提交回報資料。您可以先點選左側「📝 每日工作回報」測試送出一筆！")
-        else:
-            for col in ["包貨件數", "包貨總分鐘", "單件包貨耗時(分)", "寄貨件數", "客服總分鐘", "直播總分鐘"]:
-                if col not in df.columns:
-                    df[col] = 0
-                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-                
-            # 【關鍵即時重算機制】：每次載入都根據最新的起訖時間與件數強制校準分鐘數與單件效率，確保修改後折線圖 100% 同步！
-            df["包貨總分鐘"] = df.apply(
-                lambda r: calc_minutes_str(r.get("包貨開始", "無"), r.get("包貨結束", "無")) if calc_minutes_str(r.get("包貨開始", "無"), r.get("包貨結束", "無")) > 0 else r["包貨總分鐘"], axis=1
-            )
-            df["單件包貨耗時(分)"] = df.apply(
-                lambda r: round(r["包貨總分鐘"] / r["包貨件數"], 2) if r["包貨件數"] > 0 else 0, axis=1
-            )
-            df["客服總分鐘"] = df.apply(
-                lambda r: calc_minutes_str(r.get("客服開始", "無"), r.get("客服結束", "無")) if calc_minutes_str(r.get("客服開始", "無"), r.get("客服結束", "無")) > 0 else r["客服總分鐘"], axis=1
-            )
-            df["直播總分鐘"] = df.apply(
-                lambda r: calc_minutes_str(r.get("直播開始", "無"), r.get("直播結束", "無")) if calc_minutes_str(r.get("直播開始", "無"), r.get("直播結束", "無")) > 0 else r["直播總分鐘"], axis=1
-            )
-            
-            df["月份"] = df["回報日期"].astype(str).str.slice(0, 7)
-            df["季度"] = df["回報日期"].apply(get_quarter_label)
-            
-            # 1. 頂部統計區篩選器
-            st.markdown("### 🔍 統計看板與圖表篩選器")
-            col_f1, col_f2, col_f3 = st.columns(3)
-            with col_f1:
-                filter_mode = st.radio("統計週期維度", ["📅 依月份檢視", "📆 依季度檢視 (Q1~Q4)"], horizontal=True)
-            with col_f2:
-                if filter_mode == "📅 依月份檢視":
-                    periods = ["全部月份"] + sorted(df["月份"].unique().tolist(), reverse=True)
-                    sel_period = st.selectbox("選擇統計月份", periods)
-                else:
-                    periods = ["全部季度"] + sorted(df["季度"].unique().tolist(), reverse=True)
-                    sel_period = st.selectbox("選擇統計季度", periods)
-            with col_f3:
-                names = ["全部同仁"] + sorted(df["姓名"].unique().tolist())
-                sel_name = st.selectbox("👤 選擇統計同仁", names)
-                
-            filtered_df = df.copy()
-            if filter_mode == "📅 依月份檢視" and sel_period != "全部月份":
-                filtered_df = filtered_df[filtered_df["月份"] == sel_period]
-            elif filter_mode != "📅 依月份檢視" and sel_period != "全部季度":
-                filtered_df = filtered_df[filtered_df["季度"] == sel_period]
-                
-            if sel_name != "全部同仁":
-                filtered_df = filtered_df[filtered_df["姓名"] == sel_name]
 
-            # 2. 頂部關鍵指標大字卡
-            total_packs = int(filtered_df["包貨件數"].sum())
-            total_pack_min = float(filtered_df["包貨總分鐘"].sum())
-            avg_pack_speed = round(total_pack_min / total_packs, 2) if total_packs > 0 else 0
-            total_ships = int(filtered_df["寄貨件數"].sum())
-            total_cs_hr = round(filtered_df["客服總分鐘"].sum() / 60.0, 1)
-            total_live_hr = round(filtered_df["直播總分鐘"].sum() / 60.0, 1)
+        dept_tab1, dept_tab2 = st.tabs(["✨ 【黃金部門】數據與回報管理", "🎛️ 【操台部門】工時統計與回報管理"])
 
-            k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric("📦 區間總包貨件數", f"{total_packs} 件")
-            k2.metric("⚡ 平均單件包貨耗時", f"{avg_pack_speed} 分鐘/件")
-            k3.metric("🚚 區間總寄貨件數", f"{total_ships} 件")
-            k4.metric("💬 客服累計總時數", f"{total_cs_hr} 小時")
-            k5.metric("🎥 直播累計總時數", f"{total_live_hr} 小時")
-
-            st.divider()
-
-            # 3. 各同仁當月/當季個別統計總表
-            st.subheader(f"📈 各同仁個別統計總表 ({sel_period} - {sel_name})")
-            if not filtered_df.empty:
-                summary_df = filtered_df.groupby("姓名").agg(
-                    出勤回報天數=("回報單號", "count"),
-                    總包貨件數=("包貨件數", "sum"),
-                    總包貨耗時_分=("包貨總分鐘", "sum"),
-                    總寄貨件數=("寄貨件數", "sum"),
-                    客服總時數_小時=("客服總分鐘", lambda x: round(x.sum() / 60.0, 2)),
-                    直播總時數_小時=("直播總分鐘", lambda x: round(x.sum() / 60.0, 2)),
-                    客訴發生次數=("有無客訴", lambda x: (x == "有").sum())
-                ).reset_index()
-                
-                summary_df["平均每件包貨耗時(分/件)"] = summary_df.apply(
-                    lambda r: round(r["總包貨耗時_分"] / r["總包貨件數"], 2) if r["總包貨件數"] > 0 else 0, axis=1
+        # ---------------------------------------------------------------------
+        # 分頁 1：黃金部門後台
+        # ---------------------------------------------------------------------
+        with dept_tab1:
+            df = load_reports_df()
+            if df.empty:
+                st.info("目前黃金部門尚無任何回報資料。")
+            else:
+                for col in ["包貨件數", "包貨總分鐘", "單件包貨耗時(分)", "寄貨件數", "客服總分鐘", "直播總分鐘"]:
+                    if col not in df.columns:
+                        df[col] = 0
+                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+                    
+                df["上班總分鐘"] = df.apply(lambda r: calc_minutes_str(r.get("上班時間", "09:00"), r.get("下班時間", "18:00")), axis=1)
+                df["上班時數(小時)"] = (df["上班總分鐘"] / 60.0).round(2)
+                df["包貨總分鐘"] = df.apply(
+                    lambda r: calc_minutes_str(r.get("包貨開始", "無"), r.get("包貨結束", "無")) if calc_minutes_str(r.get("包貨開始", "無"), r.get("包貨結束", "無")) > 0 else r["包貨總分鐘"], axis=1
                 )
-                summary_df = summary_df[[
-                    "姓名", "出勤回報天數", "總包貨件數", "總包貨耗時_分", "平均每件包貨耗時(分/件)",
-                    "總寄貨件數", "客服總時數_小時", "直播總時數_小時", "客訴發生次數"
-                ]]
-                st.dataframe(summary_df, use_container_width=True)
-
-                # 4. 包貨效率折線圖專區（橫軸：天 / 縱軸：效率）
-                st.divider()
-                st.subheader("📈 每日包貨效率折線圖（橫軸：天 ／ 縱軸：單件包貨耗時分鐘）")
+                df["單件包貨耗時(分)"] = df.apply(
+                    lambda r: round(r["包貨總分鐘"] / r["包貨件數"], 2) if r["包貨件數"] > 0 else 0, axis=1
+                )
+                df["客服總分鐘"] = df.apply(
+                    lambda r: calc_minutes_str(r.get("客服開始", "無"), r.get("客服結束", "無")) if calc_minutes_str(r.get("客服開始", "無"), r.get("客服結束", "無")) > 0 else r["客服總分鐘"], axis=1
+                )
+                df["直播總分鐘"] = df.apply(
+                    lambda r: calc_minutes_str(r.get("直播開始", "無"), r.get("直播結束", "無")) if calc_minutes_str(r.get("直播開始", "無"), r.get("直播結束", "無")) > 0 else r["直播總分鐘"], axis=1
+                )
                 
-                daily_pack_df = filtered_df[filtered_df["包貨件數"] > 0].copy()
-                if not daily_pack_df.empty:
-                    daily_grouped = daily_pack_df.groupby(["回報日期", "姓名"], as_index=False).agg(
-                        當日包貨件數=("包貨件數", "sum"),
-                        當日包貨總分鐘=("包貨總分鐘", "sum")
-                    )
-                    daily_grouped["單件包貨耗時(分/件)"] = (
-                        daily_grouped["當日包貨總分鐘"] / daily_grouped["當日包貨件數"]
-                    ).round(2)
-                    
-                    # 嚴格依據日期先後排序，鎖定橫軸順序，解決不同人不同天導致橫軸日期亂跳的問題
-                    sorted_all_dates = sorted(daily_grouped["回報日期"].unique().tolist())
-                    daily_grouped = daily_grouped.sort_values(["回報日期", "姓名"])
-
-                    st.markdown("#### 👥 各同仁包貨效率比較折線圖")
-                    fig_compare = px.line(
-                        daily_grouped,
-                        x="回報日期",
-                        y="單件包貨耗時(分/件)",
-                        color="姓名",
-                        markers=True,
-                        text="單件包貨耗時(分/件)",
-                        hover_data=["當日包貨件數", "當日包貨總分鐘"],
-                        category_orders={"回報日期": sorted_all_dates},
-                        labels={
-                            "回報日期": "日期 (天)",
-                            "單件包貨耗時(分/件)": "效率：單件包貨耗時 (分/件)"
-                        }
-                    )
-                    fig_compare.update_xaxes(type="category", categoryorder="array", categoryarray=sorted_all_dates)
-                    fig_compare.update_traces(textposition="top center", connectgaps=True, marker=dict(size=9))
-                    st.plotly_chart(fig_compare, use_container_width=True)
-
-                    st.markdown("#### 👤 單獨同仁包貨效率折線圖")
-                    staff_list = sorted(daily_grouped["姓名"].unique().tolist())
-                    col_s1, col_s2 = st.columns([1, 2])
-                    with col_s1:
-                        target_staff = st.selectbox(
-                            "請選擇要單獨檢視折線圖的同仁：",
-                            ["📋 一次展開所有同仁各自的獨立折線圖"] + staff_list
-                        )
-                    
-                    if target_staff == "📋 一次展開所有同仁各自的獨立折線圖":
-                        cols_per_row = 2
-                        for i in range(0, len(staff_list), cols_per_row):
-                            c_list = st.columns(cols_per_row)
-                            for j in range(cols_per_row):
-                                if i + j < len(staff_list):
-                                    st_name = staff_list[i + j]
-                                    single_df = daily_grouped[daily_grouped["姓名"] == st_name].sort_values("回報日期")
-                                    s_dates = sorted(single_df["回報日期"].unique().tolist())
-                                    fig_single = px.line(
-                                        single_df,
-                                        x="回報日期",
-                                        y="單件包貨耗時(分/件)",
-                                        markers=True,
-                                        text="單件包貨耗時(分/件)",
-                                        hover_data=["當日包貨件數", "當日包貨總分鐘"],
-                                        category_orders={"回報日期": s_dates},
-                                        title=f"👤 {st_name} - 個人每日包貨效率折線圖",
-                                        labels={
-                                            "回報日期": "日期 (天)",
-                                            "單件包貨耗時(分/件)": "效率：單件耗時 (分/件)"
-                                        }
-                                    )
-                                    fig_single.update_xaxes(type="category", categoryorder="array", categoryarray=s_dates)
-                                    fig_single.update_traces(line_color="#00B4D8", textposition="top center", marker=dict(size=9))
-                                    c_list[j].plotly_chart(fig_single, use_container_width=True)
+                df["月份"] = df["回報日期"].astype(str).str.slice(0, 7)
+                df["季度"] = df["回報日期"].apply(get_quarter_label)
+                
+                st.markdown("### 🔍 黃金部門 - 統計看板與圖表篩選器")
+                col_f1, col_f2, col_f3 = st.columns(3)
+                with col_f1:
+                    filter_mode = st.radio("統計週期維度", ["📅 依月份檢視", "📆 依季度檢視 (Q1~Q4)"], horizontal=True, key="g_fmode")
+                with col_f2:
+                    if filter_mode == "📅 依月份檢視":
+                        periods = ["全部月份"] + sorted(df["月份"].unique().tolist(), reverse=True)
+                        sel_period = st.selectbox("選擇統計月份", periods, key="g_fper")
                     else:
-                        single_df = daily_grouped[daily_grouped["姓名"] == target_staff].sort_values("回報日期")
-                        s_dates = sorted(single_df["回報日期"].unique().tolist())
-                        fig_single = px.line(
-                            single_df,
+                        periods = ["全部季度"] + sorted(df["季度"].unique().tolist(), reverse=True)
+                        sel_period = st.selectbox("選擇統計季度", periods, key="g_fqtr")
+                with col_f3:
+                    names = ["全部同仁"] + sorted(df["姓名"].unique().tolist())
+                    sel_name = st.selectbox("👤 選擇統計同仁", names, key="g_fname")
+                    
+                filtered_df = df.copy()
+                if filter_mode == "📅 依月份檢視" and sel_period != "全部月份":
+                    filtered_df = filtered_df[filtered_df["月份"] == sel_period]
+                elif filter_mode != "📅 依月份檢視" and sel_period != "全部季度":
+                    filtered_df = filtered_df[filtered_df["季度"] == sel_period]
+                    
+                if sel_name != "全部同仁":
+                    filtered_df = filtered_df[filtered_df["姓名"] == sel_name]
+
+                total_work_hr = round(filtered_df["上班總分鐘"].sum() / 60.0, 1)
+                total_packs = int(filtered_df["包貨件數"].sum())
+                total_pack_min = float(filtered_df["包貨總分鐘"].sum())
+                avg_pack_speed = round(total_pack_min / total_packs, 2) if total_packs > 0 else 0
+                total_ships = int(filtered_df["寄貨件數"].sum())
+                total_cs_hr = round(filtered_df["客服總分鐘"].sum() / 60.0, 1)
+                total_live_hr = round(filtered_df["直播總分鐘"].sum() / 60.0, 1)
+
+                k0, k1, k2, k3, k4, k5 = st.columns(6)
+                k0.metric("🕒 區間上班總時數", f"{total_work_hr} 小時")
+                k1.metric("📦 區間總包貨件數", f"{total_packs} 件")
+                k2.metric("⚡ 平均單件包貨耗時", f"{avg_pack_speed} 分/件")
+                k3.metric("🚚 區間總寄貨件數", f"{total_ships} 件")
+                k4.metric("💬 客服累計總時數", f"{total_cs_hr} 小時")
+                k5.metric("🎥 直播累計總時數", f"{total_live_hr} 小時")
+
+                st.divider()
+
+                st.subheader(f"📈 黃金部門 - 各同仁當月/區間個別統計總表 ({sel_period} - {sel_name})")
+                if not filtered_df.empty:
+                    summary_df = filtered_df.groupby("姓名").agg(
+                        出勤回報天數=("回報單號", "count"),
+                        當月上班總時數_小時=("上班總分鐘", lambda x: round(x.sum() / 60.0, 2)),
+                        總包貨件數=("包貨件數", "sum"),
+                        總包貨耗時_分=("包貨總分鐘", "sum"),
+                        總寄貨件數=("寄貨件數", "sum"),
+                        客服總時數_小時=("客服總分鐘", lambda x: round(x.sum() / 60.0, 2)),
+                        直播總時數_小時=("直播總分鐘", lambda x: round(x.sum() / 60.0, 2)),
+                        客訴發生次數=("有無客訴", lambda x: (x == "有").sum())
+                    ).reset_index()
+                    
+                    summary_df["平均每件包貨耗時(分/件)"] = summary_df.apply(
+                        lambda r: round(r["總包貨耗時_分"] / r["總包貨件數"], 2) if r["總包貨件數"] > 0 else 0, axis=1
+                    )
+                    summary_df = summary_df[[
+                        "姓名", "出勤回報天數", "當月上班總時數_小時", "總包貨件數", "總包貨耗時_分",
+                        "平均每件包貨耗時(分/件)", "總寄貨件數", "客服總時數_小時", "直播總時數_小時", "客訴發生次數"
+                    ]]
+                    st.dataframe(summary_df, use_container_width=True)
+
+                    st.divider()
+                    st.subheader("📈 每日包貨效率折線圖（橫軸：天 ／ 縱軸：單件包貨耗時分鐘）")
+                    
+                    daily_pack_df = filtered_df[filtered_df["包貨件數"] > 0].copy()
+                    if not daily_pack_df.empty:
+                        daily_grouped = daily_pack_df.groupby(["回報日期", "姓名"], as_index=False).agg(
+                            當日包貨件數=("包貨件數", "sum"),
+                            當日包貨總分鐘=("包貨總分鐘", "sum")
+                        )
+                        daily_grouped["單件包貨耗時(分/件)"] = (
+                            daily_grouped["當日包貨總分鐘"] / daily_grouped["當日包貨件數"]
+                        ).round(2)
+                        
+                        sorted_all_dates = sorted(daily_grouped["回報日期"].unique().tolist())
+                        daily_grouped = daily_grouped.sort_values(["回報日期", "姓名"])
+
+                        st.markdown("#### 👥 各同仁包貨效率比較折線圖")
+                        fig_compare = px.line(
+                            daily_grouped,
                             x="回報日期",
                             y="單件包貨耗時(分/件)",
+                            color="姓名",
                             markers=True,
                             text="單件包貨耗時(分/件)",
                             hover_data=["當日包貨件數", "當日包貨總分鐘"],
-                            category_orders={"回報日期": s_dates},
-                            title=f"👤 {target_staff} - 個人每日包貨效率折線圖",
+                            category_orders={"回報日期": sorted_all_dates},
                             labels={
                                 "回報日期": "日期 (天)",
-                                "單件包貨耗時(分/件)": "效率：單件耗時 (分/件)"
+                                "單件包貨耗時(分/件)": "效率：單件包貨耗時 (分/件)"
                             }
                         )
-                        fig_single.update_xaxes(type="category", categoryorder="array", categoryarray=s_dates)
-                        fig_single.update_traces(line_color="#00B4D8", textposition="top center", marker=dict(size=9))
-                        st.plotly_chart(fig_single, use_container_width=True)
-                else:
-                    st.caption("目前篩選區間內尚無包貨數據可繪製效率折線圖。")
+                        fig_compare.update_xaxes(type="category", categoryorder="array", categoryarray=sorted_all_dates)
+                        fig_compare.update_traces(textposition="top center", connectgaps=True, marker=dict(size=9))
+                        st.plotly_chart(fig_compare, use_container_width=True)
 
-            st.divider()
-
-            # 5. 匯出美化版分頁 Excel 報表
-            st.subheader("📥 匯出美化版分頁 Excel 報表")
-            col_dl1, col_dl2 = st.columns([2, 1])
-            
-            df_overview_exp = pd.DataFrame({
-                "回報日期": filtered_df["回報日期"],
-                "姓名": filtered_df["姓名"],
-                "上下班時間": filtered_df["上班時間"] + " ~ " + filtered_df["下班時間"],
-                "包貨時段": filtered_df["包貨開始"] + " ~ " + filtered_df["包貨結束"],
-                "包貨件數": filtered_df["包貨件數"],
-                "包貨總分鐘": filtered_df["包貨總分鐘"],
-                "單件耗時(分)": filtered_df["單件包貨耗時(分)"],
-                "寄貨件數": filtered_df["寄貨件數"],
-                "客服時段": filtered_df["客服開始"] + " ~ " + filtered_df["客服結束"],
-                "客服時數(小時)": (filtered_df["客服總分鐘"] / 60.0).round(2),
-                "直播時段": filtered_df["直播開始"] + " ~ " + filtered_df["直播結束"],
-                "直播時數(小時)": (filtered_df["直播總分鐘"] / 60.0).round(2),
-                "有無客訴": filtered_df["有無客訴"]
-            })
-            
-            df_tasks_exp = pd.DataFrame({
-                "回報日期": filtered_df["回報日期"],
-                "姓名": filtered_df["姓名"],
-                "今日處理事項明細": filtered_df["今日處理事項"],
-                "提案改善": filtered_df["提案改善"],
-                "對其他同仁想法": filtered_df["對同仁想法"]
-            })
-            
-            comp_only = filtered_df[(filtered_df["有無客訴"] == "有") | (filtered_df["有無8D"] == "是")]
-            df_comp_exp = pd.DataFrame({
-                "回報日期": comp_only["回報日期"],
-                "姓名": comp_only["姓名"],
-                "1.客人(Who)": comp_only["客訴_Who"],
-                "2.管道(Where)": comp_only["客訴_Where"],
-                "3.訂單與日期(When)": comp_only["客訴_When"],
-                "4.問題詳情(What)": comp_only["客訴_What"],
-                "5.原因分析(Why)": comp_only["客訴_Why"],
-                "6.解決方案(How)": comp_only["客訴_How"],
-                "有無8D": comp_only["有無8D"],
-                "8D檔名": comp_only["8D檔名"]
-            })
-
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                if not filtered_df.empty:
-                    summary_df.to_excel(writer, index=False, sheet_name="1_人員統計彙整")
-                df_overview_exp.to_excel(writer, index=False, sheet_name="2_每日作業總覽")
-                df_tasks_exp.to_excel(writer, index=False, sheet_name="3_事項與提案明細")
-                df_comp_exp.to_excel(writer, index=False, sheet_name="4_客訴異常紀錄")
-                style_excel_File(writer)
-            
-            safe_period_str = sel_period if ("全部" not in sel_period) else "ALL"
-            with col_dl1:
-                st.download_button(
-                    label="📊 點擊下載【美化分頁版】Excel 報表 (.xlsx)",
-                    data=output.getvalue(),
-                    file_name=f"Gold_Report_{safe_period_str}_{get_tw_today().strftime('%Y%m%d')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary",
-                    use_container_width=True
-                )
-            with col_dl2:
-                if st.button("✨ 手動重新美化並同步 Google 試算表", use_container_width=True):
-                    sync_pretty_sheets(ws_reports, ws_compact, ws_comp, apply_style=True)
-                    clear_all_caches()
-                    st.success("✅ 已將線上 Google 試算表重新排版上色並同步最新資料！")
-
-            st.divider()
-
-            # 6. 每日回報詳細內容卡片檢視區（含管理員單筆修改 & 單筆刪除二次確認）
-            st.subheader("📋 每日回報詳細內容檢視、修改與刪除管理")
-            st.caption("可於下方直接選擇想查看的月份、同仁或特定日期，並可針對單筆回報直接點擊「✏️ 修改此筆回報內容」更正錯字或數據：")
-            
-            det_c1, det_c2, det_c3, det_c4 = st.columns(4)
-            with det_c1:
-                all_months_det = ["全部月份"] + sorted(df["月份"].unique().tolist(), reverse=True)
-                default_m_idx = all_months_det.index(sel_period) if (filter_mode == "📅 依月份檢視" and sel_period in all_months_det) else 0
-                det_month = st.selectbox("📅 選擇檢視月份", all_months_det, index=default_m_idx, key="det_m_sel")
-            with det_c2:
-                all_names_det = ["全部同仁"] + sorted(df["姓名"].unique().tolist())
-                default_n_idx = all_names_det.index(sel_name) if sel_name in all_names_det else 0
-                det_name = st.selectbox("👤 選擇檢視同仁", all_names_det, index=default_n_idx, key="det_n_sel")
-                
-            detail_df = df.copy()
-            if det_month != "全部月份":
-                detail_df = detail_df[detail_df["月份"] == det_month]
-            if det_name != "全部同仁":
-                detail_df = detail_df[detail_df["姓名"] == det_name]
-                
-            with det_c3:
-                avail_dates = ["全部日期"] + sorted(detail_df["回報日期"].unique().tolist(), reverse=True)
-                det_date = st.selectbox("📆 選擇特定日期", avail_dates, key="det_d_sel")
-            with det_c4:
-                det_status = st.selectbox("🚨 客訴 / 異常快篩", ["全部回報", "🚨 僅看有客訴", "📎 僅看有附8D報告"], key="det_s_sel")
-                
-            if det_date != "全部日期":
-                detail_df = detail_df[detail_df["回報日期"] == det_date]
-            if det_status == "🚨 僅看有客訴":
-                detail_df = detail_df[detail_df["有無客訴"] == "有"]
-            elif det_status == "📎 僅看有附8D報告":
-                detail_df = detail_df[detail_df["有無8D"] == "是"]
-
-            if detail_df.empty:
-                st.info("🔍 此篩選條件下無符合的回報紀錄。")
-            else:
-                sorted_df = detail_df.sort_values(by=["回報日期", "送出時間"], ascending=[False, False]).reset_index(drop=True)
-                st.caption(f"共找到 **{len(sorted_df)}** 筆符合條件的回報單（已按日期由新到舊排列）：")
-                
-                for idx, row in sorted_df.iterrows():
-                    r_id = row.get("回報單號", f"idx_{idx}")
-                    alert_badge = " 🚨【有客訴】" if row.get("有無客訴") == "有" else ""
-                    badge_8d = " 📎【附8D報告】" if row.get("有無8D") == "是" else ""
-                    exp_title = f"📅 {row.get('回報日期', '')} ｜ 👤 {row.get('姓名', '')} ｜ 🕒 上下班：{row.get('上班時間', '')}~{row.get('下班時間', '')} ｜ 📦 包貨：{int(row.get('包貨件數', 0))}件 ({row.get('單件包貨耗時(分)', 0)}分/件) / 🚚 寄貨：{int(row.get('寄貨件數', 0))}件{alert_badge}{badge_8d}"
-                    
-                    is_editing_this = (st.session_state.edit_report_id == r_id)
-                    with st.expander(exp_title, expanded=(idx == 0 or is_editing_this)):
-                        c1, c2, c3, c4 = st.columns(4)
-                        c1.markdown(f"**🕒 出勤時間**\n\n`{row.get('上班時間', '')} ~ {row.get('下班時間', '')}`")
-                        if int(row.get("包貨件數", 0)) > 0:
-                            c2.markdown(f"**📦 包貨紀錄**\n\n`{row.get('包貨開始', '')} ~ {row.get('包貨結束', '')}`\n共 **{int(row.get('包貨件數', 0))}** 件 (`{row.get('單件包貨耗時(分)', 0)}` 分/件)")
-                        else:
-                            c2.markdown("**📦 包貨紀錄**\n\n`無`")
-                            
-                        cs_hr_row = round(float(row.get("客服總分鐘", 0)) / 60.0, 2)
-                        c3.markdown(f"**🚚 寄貨 / 💬 客服**\n\n寄貨：**{int(row.get('寄貨件數', 0))}** 件\n客服：`{row.get('客服開始', '無')} ~ {row.get('客服結束', '無')}` (**{cs_hr_row}** 小時)")
-                        
-                        lv_hr_row = round(float(row.get("直播總分鐘", 0)) / 60.0, 2)
-                        c4.markdown(f"**🎥 直播紀錄**\n\n時段：`{row.get('直播開始', '無')} ~ {row.get('直播結束', '無')}`\n時長：**{lv_hr_row}** 小時")
-                        
-                        st.markdown("---")
-                        st.markdown("#### 📝 今日處理事項明細")
-                        tasks_text = str(row.get("今日處理事項", "")).strip()
-                        if tasks_text:
-                            for line in tasks_text.split("\n"):
-                                st.markdown(f"- {line}")
-                        else:
-                            st.caption("無填寫內容")
-                            
-                        col_p1, col_p2 = st.columns(2)
-                        with col_p1:
-                            st.markdown("#### 💡 提案改善")
-                            prop_text = str(row.get("提案改善", "")).strip()
-                            if prop_text:
-                                st.info(prop_text)
-                            else:
-                                st.caption("無提案")
-                        with col_p2:
-                            st.markdown("#### 🤝 針對其他同仁想法")
-                            peer_text = str(row.get("對同仁想法", "")).strip()
-                            if peer_text:
-                                st.warning(peer_text)
-                            else:
-                                st.caption("無填寫")
-                                
-                        if row.get("有無客訴") == "有":
-                            st.markdown("---")
-                            st.error("🚨 **客訴案件 5W1H 詳細報告**")
-                            st.markdown(f"- **1. 【Who】客人本名 + TK名：** {row.get('客訴_Who', '')}")
-                            st.markdown(f"- **2. 【Where】發生管道：** {row.get('客訴_Where', '')}")
-                            st.markdown(f"- **3. 【When】訂單與客訴日期：** {row.get('客訴_When', '')}")
-                            st.markdown(f"- **4. 【What】發生什麼事 / 商品問題：**\n  > {row.get('客訴_What', '')}")
-                            st.markdown(f"- **5. 【Why】客訴背後原因：**\n  > {row.get('客訴_Why', '')}")
-                            st.markdown(f"- **6. 【How】解決方案與未來改善：**\n  > {row.get('客訴_How', '')}")
-                            
-                        if row.get("有無8D") == "是" and row.get("8D檔案編碼"):
-                            st.markdown("---")
-                            b64_bytes = base64.b64decode(row["8D檔案編碼"])
-                            st.download_button(
-                                label=f"📎 點擊下載 8D 報告檔案 ({row.get('8D檔名', '8D_report.xlsx')})",
-                                data=b64_bytes,
-                                file_name=f"8D_{r_id}_{row.get('8D檔名', 'report.xlsx')}",
-                                key=f"dl_card_{r_id}"
+                        st.markdown("#### 👤 單獨同仁包貨效率折線圖")
+                        staff_list = sorted(daily_grouped["姓名"].unique().tolist())
+                        col_s1, _ = st.columns([1, 2])
+                        with col_s1:
+                            target_staff = st.selectbox(
+                                "請選擇要單獨檢視折線圖的同仁：",
+                                ["📋 一次展開所有同仁各自的獨立折線圖"] + staff_list
                             )
-                            
-                        st.markdown("---")
-                        foot_c1, foot_c2, foot_c3 = st.columns([2.5, 1.2, 1.3])
-                        foot_c1.caption(f"系統回報單號：{r_id} ｜ 實際送出時間 (台灣時間)：{row.get('送出時間', '')}")
                         
-                        with foot_c2:
-                            if is_editing_this:
-                                if st.button("❌ 收合修改面板", key=f"close_edit_{r_id}", use_container_width=True):
-                                    st.session_state.edit_report_id = None
-                                    st.rerun()
-                            else:
-                                if st.button("✏️ 修改此筆回報內容", key=f"adm_edit_{r_id}", use_container_width=True):
-                                    st.session_state.edit_report_id = r_id
-                                    st.session_state.confirm_del_id = None
-                                    st.rerun()
+                        if target_staff == "📋 一次展開所有同仁各自的獨立折線圖":
+                            cols_per_row = 2
+                            for i in range(0, len(staff_list), cols_per_row):
+                                c_list = st.columns(cols_per_row)
+                                for j in range(cols_per_row):
+                                    if i + j < len(staff_list):
+                                        st_name = staff_list[i + j]
+                                        single_df = daily_grouped[daily_grouped["姓名"] == st_name].sort_values("回報日期")
+                                        s_dates = sorted(single_df["回報日期"].unique().tolist())
+                                        fig_single = px.line(
+                                            single_df,
+                                            x="回報日期",
+                                            y="單件包貨耗時(分/件)",
+                                            markers=True,
+                                            text="單件包貨耗時(分/件)",
+                                            hover_data=["當日包貨件數", "當日包貨總分鐘"],
+                                            category_orders={"回報日期": s_dates},
+                                            title=f"👤 {st_name} - 個人每日包貨效率折線圖",
+                                            labels={"回報日期": "日期 (天)", "單件包貨耗時(分/件)": "效率：單件耗時 (分/件)"}
+                                        )
+                                        fig_single.update_xaxes(type="category", categoryorder="array", categoryarray=s_dates)
+                                        fig_single.update_traces(line_color="#00B4D8", textposition="top center", marker=dict(size=9))
+                                        c_list[j].plotly_chart(fig_single, use_container_width=True)
+                        else:
+                            single_df = daily_grouped[daily_grouped["姓名"] == target_staff].sort_values("回報日期")
+                            s_dates = sorted(single_df["回報日期"].unique().tolist())
+                            fig_single = px.line(
+                                single_df,
+                                x="回報日期",
+                                y="單件包貨耗時(分/件)",
+                                markers=True,
+                                text="單件包貨耗時(分/件)",
+                                hover_data=["當日包貨件數", "當日包貨總分鐘"],
+                                category_orders={"回報日期": s_dates},
+                                title=f"👤 {target_staff} - 個人每日包貨效率折線圖",
+                                labels={"回報日期": "日期 (天)", "單件包貨耗時(分/件)": "效率：單件耗時 (分/件)"}
+                            )
+                            fig_single.update_xaxes(type="category", categoryorder="array", categoryarray=s_dates)
+                            fig_single.update_traces(line_color="#00B4D8", textposition="top center", marker=dict(size=9))
+                            st.plotly_chart(fig_single, use_container_width=True)
+                    else:
+                        st.caption("目前篩選區間內尚無包貨數據可繪製效率折線圖。")
 
-                        with foot_c3:
-                            if st.session_state.confirm_del_id == f"adm_{r_id}":
-                                st.warning(f"⚠️ 確定要永久刪除嗎？")
-                                dc1, dc2 = st.columns(2)
-                                if dc1.button("✅ 確定", key=f"yes_adm_{r_id}", type="primary", use_container_width=True):
-                                    if delete_report_by_id(ws_reports, ws_compact, ws_comp, r_id):
-                                        st.session_state.confirm_del_id = None
-                                        st.success(f"✅ 已徹底刪除 {row.get('回報日期', '')} - {row.get('姓名', '')} 的回報紀錄！")
-                                        st.rerun()
-                                if dc2.button("❌ 取消", key=f"no_adm_{r_id}", use_container_width=True):
-                                    st.session_state.confirm_del_id = None
-                                    st.rerun()
-                            else:
-                                if st.button("🗑️ 刪除此筆回報紀錄", key=f"adm_del_{r_id}", use_container_width=True):
-                                    st.session_state.confirm_del_id = f"adm_{r_id}"
-                                    st.session_state.edit_report_id = None
-                                    st.rerun()
+                st.divider()
 
-                        # ================= 管理員專屬：單筆回報內容原地修改面板 =================
-                        if is_editing_this:
+                st.subheader("📥 匯出黃金部門美化版 Excel 報表")
+                col_dl1, col_dl2 = st.columns([2, 1])
+                
+                df_overview_exp = pd.DataFrame({
+                    "回報日期": filtered_df["回報日期"],
+                    "姓名": filtered_df["姓名"],
+                    "上下班時間": filtered_df["上班時間"] + " ~ " + filtered_df["下班時間"],
+                    "當日上班時數(小時)": filtered_df["上班時數(小時)"],
+                    "包貨時段": filtered_df["包貨開始"] + " ~ " + filtered_df["包貨結束"],
+                    "包貨件數": filtered_df["包貨件數"],
+                    "包貨總分鐘": filtered_df["包貨總分鐘"],
+                    "單件耗時(分)": filtered_df["單件包貨耗時(分)"],
+                    "寄貨件數": filtered_df["寄貨件數"],
+                    "客服時段": filtered_df["客服開始"] + " ~ " + filtered_df["客服結束"],
+                    "客服時數(小時)": (filtered_df["客服總分鐘"] / 60.0).round(2),
+                    "直播時段": filtered_df["直播開始"] + " ~ " + filtered_df["直播結束"],
+                    "直播時數(小時)": (filtered_df["直播總分鐘"] / 60.0).round(2),
+                    "有無客訴": filtered_df["有無客訴"]
+                })
+                
+                df_tasks_exp = pd.DataFrame({
+                    "回報日期": filtered_df["回報日期"],
+                    "姓名": filtered_df["姓名"],
+                    "今日處理事項明細": filtered_df["今日處理事項"],
+                    "提案改善": filtered_df["提案改善"],
+                    "對其他同仁想法": filtered_df["對同仁想法"]
+                })
+                
+                comp_only = filtered_df[(filtered_df["有無客訴"] == "有") | (filtered_df["有無8D"] == "是")]
+                df_comp_exp = pd.DataFrame({
+                    "回報日期": comp_only["回報日期"],
+                    "姓名": comp_only["姓名"],
+                    "1.客人(Who)": comp_only["客訴_Who"],
+                    "2.管道(Where)": comp_only["客訴_Where"],
+                    "3.訂單與日期(When)": comp_only["客訴_When"],
+                    "4.問題詳情(What)": comp_only["客訴_What"],
+                    "5.原因分析(Why)": comp_only["客訴_Why"],
+                    "6.解決方案(How)": comp_only["客訴_How"],
+                    "有無8D": comp_only["有無8D"],
+                    "8D檔名": comp_only["8D檔名"]
+                })
+
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                    if not filtered_df.empty:
+                        summary_df.to_excel(writer, index=False, sheet_name="1_人員工時與統計彙整")
+                    df_overview_exp.to_excel(writer, index=False, sheet_name="2_每日作業總覽")
+                    df_tasks_exp.to_excel(writer, index=False, sheet_name="3_事項與提案明細")
+                    df_comp_exp.to_excel(writer, index=False, sheet_name="4_客訴異常紀錄")
+                    style_excel_File(writer)
+                
+                safe_period_str = sel_period if ("全部" not in sel_period) else "ALL"
+                with col_dl1:
+                    st.download_button(
+                        label="📊 點擊下載【黃金部門】美化分頁版 Excel 報表 (.xlsx)",
+                        data=output.getvalue(),
+                        file_name=f"Gold_Report_{safe_period_str}_{get_tw_today().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary",
+                        use_container_width=True
+                    )
+                with col_dl2:
+                    if st.button("✨ 重新美化並同步 Google 試算表", key="sync_g_btn", use_container_width=True):
+                        sync_pretty_sheets(ws_reports, ws_compact, ws_comp, apply_style=True)
+                        clear_all_caches()
+                        st.success("✅ 已將線上 Google 試算表重新排版上色並同步最新資料！")
+
+                st.divider()
+
+                st.subheader("📋 黃金部門 - 每日回報詳細內容檢視、修改與刪除管理")
+                det_c1, det_c2, det_c3, det_c4 = st.columns(4)
+                with det_c1:
+                    all_months_det = ["全部月份"] + sorted(df["月份"].unique().tolist(), reverse=True)
+                    default_m_idx = all_months_det.index(sel_period) if (filter_mode == "📅 依月份檢視" and sel_period in all_months_det) else 0
+                    det_month = st.selectbox("📅 選擇檢視月份", all_months_det, index=default_m_idx, key="det_m_sel")
+                with det_c2:
+                    all_names_det = ["全部同仁"] + sorted(df["姓名"].unique().tolist())
+                    default_n_idx = all_names_det.index(sel_name) if sel_name in all_names_det else 0
+                    det_name = st.selectbox("👤 選擇檢視同仁", all_names_det, index=default_n_idx, key="det_n_sel")
+                    
+                detail_df = df.copy()
+                if det_month != "全部月份":
+                    detail_df = detail_df[detail_df["月份"] == det_month]
+                if det_name != "全部同仁":
+                    detail_df = detail_df[detail_df["姓名"] == det_name]
+                    
+                with det_c3:
+                    avail_dates = ["全部日期"] + sorted(detail_df["回報日期"].unique().tolist(), reverse=True)
+                    det_date = st.selectbox("📆 選擇特定日期", avail_dates, key="det_d_sel")
+                with det_c4:
+                    det_status = st.selectbox("🚨 客訴 / 異常快篩", ["全部回報", "🚨 僅看有客訴", "📎 僅看有附8D報告"], key="det_s_sel")
+                    
+                if det_date != "全部日期":
+                    detail_df = detail_df[detail_df["回報日期"] == det_date]
+                if det_status == "🚨 僅看有客訴":
+                    detail_df = detail_df[detail_df["有無客訴"] == "有"]
+                elif det_status == "📎 僅看有附8D報告":
+                    detail_df = detail_df[detail_df["有無8D"] == "是"]
+
+                if detail_df.empty:
+                    st.info("🔍 此篩選條件下無符合的回報紀錄。")
+                else:
+                    sorted_df = detail_df.sort_values(by=["回報日期", "送出時間"], ascending=[False, False]).reset_index(drop=True)
+                    for idx, row in sorted_df.iterrows():
+                        r_id = row.get("回報單號", f"idx_{idx}")
+                        alert_badge = " 🚨【有客訴】" if row.get("有無客訴") == "有" else ""
+                        badge_8d = " 📎【附8D報告】" if row.get("有無8D") == "是" else ""
+                        exp_title = f"📅 {row.get('回報日期', '')} ｜ 👤 {row.get('姓名', '')} ｜ 🕒 上下班：{row.get('上班時間', '')}~{row.get('下班時間', '')} ({row.get('上班時數(小時)', 0)}H) ｜ 📦 包貨：{int(row.get('包貨件數', 0))}件 ({row.get('單件包貨耗時(分)', 0)}分/件) / 🚚 寄貨：{int(row.get('寄貨件數', 0))}件{alert_badge}{badge_8d}"
+                        
+                        is_editing_this = (st.session_state.edit_report_id == r_id)
+                        with st.expander(exp_title, expanded=(idx == 0 or is_editing_this)):
+                            c1, c2, c3, c4 = st.columns(4)
+                            c1.markdown(f"**🕒 出勤時間 (當日工時)**\n\n`{row.get('上班時間', '')} ~ {row.get('下班時間', '')}` (**{row.get('上班時數(小時)', 0)}** 小時)")
+                            if int(row.get("包貨件數", 0)) > 0:
+                                c2.markdown(f"**📦 包貨紀錄**\n\n`{row.get('包貨開始', '')} ~ {row.get('包貨結束', '')}`\n共 **{int(row.get('包貨件數', 0))}** 件 (`{row.get('單件包貨耗時(分)', 0)}` 分/件)")
+                            else:
+                                c2.markdown("**📦 包貨紀錄**\n\n`無`")
+                                
+                            cs_hr_row = round(float(row.get("客服總分鐘", 0)) / 60.0, 2)
+                            c3.markdown(f"**🚚 寄貨 / 💬 客服**\n\n寄貨：**{int(row.get('寄貨件數', 0))}** 件\n客服：`{row.get('客服開始', '無')} ~ {row.get('客服結束', '無')}` (**{cs_hr_row}** 小時)")
+                            
+                            lv_hr_row = round(float(row.get("直播總分鐘", 0)) / 60.0, 2)
+                            c4.markdown(f"**🎥 直播紀錄**\n\n時段：`{row.get('直播開始', '無')} ~ {row.get('直播結束', '無')}`\n時長：**{lv_hr_row}** 小時")
+                            
                             st.markdown("---")
-                            st.info(f"🛠️ **正在修改【{row.get('姓名', '')} - {row.get('回報日期', '')}】的回報內容**（只要包貨件數大於 0，儲存後系統就會強制重新計算單件包貨耗時，並立即更新上方折線圖！）")
-                            with st.form(key=f"edit_form_{r_id}"):
-                                e_col1, e_col2, e_col3, e_col4 = st.columns(4)
-                                with e_col1:
-                                    e_date = st.date_input("📅 回報日期", parse_date_safe(row.get("回報日期", "")))
-                                with e_col2:
-                                    e_name = st.text_input("👤 填表人姓名", value=str(row.get("姓名", "")))
-                                with e_col3:
-                                    e_ws = st.time_input("🕒 上班時間", parse_time_safe(row.get("上班時間", "09:00"), datetime.time(9, 0)), step=60)
-                                with e_col4:
-                                    e_we = st.time_input("🕕 下班時間", parse_time_safe(row.get("下班時間", "18:00"), datetime.time(18, 0)), step=60)
-
-                                st.markdown("##### 📦 包貨與 🚚 寄貨修正（若無包貨，將『包貨件數』設為 0 即可）")
-                                ep1, ep2, ep3, ep4 = st.columns(4)
-                                with ep1:
-                                    e_ps = st.time_input("📦 包貨開始時間", parse_time_safe(row.get("包貨開始", "10:00"), datetime.time(10, 0)), step=60)
-                                with ep2:
-                                    e_pe = st.time_input("📦 包貨結束時間", parse_time_safe(row.get("包貨結束", "12:00"), datetime.time(12, 0)), step=60)
-                                with ep3:
-                                    e_pc = st.number_input("📦 包貨件數 (大於0即自動算效率)", min_value=0, value=int(row.get("包貨件數", 0)), step=1)
-                                with ep4:
-                                    e_sc = st.number_input("🚚 寄貨件數", min_value=0, value=int(row.get("寄貨件數", 0)), step=1)
-
-                                st.markdown("##### 💬 客服與 🎥 直播時段修正")
-                                ec1, ec2, ec3, ec4, ec5, ec6 = st.columns(6)
-                                orig_has_cs = str(row.get("客服開始", "無")) not in ["無", ""]
-                                orig_has_lv = str(row.get("直播開始", "無")) not in ["無", ""]
-                                with ec1:
-                                    e_has_cs = st.checkbox("💬 當日有客服", value=orig_has_cs)
-                                with ec2:
-                                    e_css = st.time_input("客服開始", parse_time_safe(row.get("客服開始", "09:00"), datetime.time(9, 0)), step=60)
-                                with ec3:
-                                    e_cse = st.time_input("客服結束", parse_time_safe(row.get("客服結束", "18:00"), datetime.time(18, 0)), step=60)
-                                with ec4:
-                                    e_has_lv = st.checkbox("🎥 當日有直播", value=orig_has_lv)
-                                with ec5:
-                                    e_lvs = st.time_input("直播開始", parse_time_safe(row.get("直播開始", "19:00"), datetime.time(19, 0)), step=60)
-                                with ec6:
-                                    e_lve = st.time_input("直播結束", parse_time_safe(row.get("直播結束", "22:00"), datetime.time(22, 0)), step=60)
-
-                                st.markdown("##### 📝 今日處理事項、提案與想法修正")
-                                e_tasks = st.text_area("今日處理事項明細 (一行一條)", value=str(row.get("今日處理事項", "")), height=110)
-                                ep_col1, ep_col2 = st.columns(2)
-                                with ep_col1:
-                                    e_prop = st.text_area("💡 提案改善", value=str(row.get("提案改善", "")))
-                                with ep_col2:
-                                    e_peer = st.text_area("🤝 對其他同仁想法", value=str(row.get("對同仁想法", "")))
-
-                                st.markdown("##### 🚨 客訴 5W1H 與 8D 檔案修正")
-                                e_hc_col1, e_hc_col2 = st.columns(2)
-                                with e_hc_col1:
-                                    e_has_comp = st.selectbox("有無客訴", ["無", "有"], index=1 if row.get("有無客訴") == "有" else 0)
-                                with e_hc_col2:
-                                    where_opts = ["", "直播上", "LINE客服上", "LINE社群", "其他"]
-                                    curr_w = str(row.get("客訴_Where", ""))
-                                    w_idx = where_opts.index(curr_w) if curr_w in where_opts else 0
-                                    e_cwhere = st.selectbox("2. 【Where】發生管道", where_opts, index=w_idx)
-
-                                ew1, ew2 = st.columns(2)
-                                with ew1:
-                                    e_cwho = st.text_input("1. 【Who】客人本名 + TK名", value=str(row.get("客訴_Who", "")))
-                                with ew2:
-                                    e_cwhen = st.text_input("3. 【When】訂單與客訴日期", value=str(row.get("客訴_When", "")))
-                                e_cwhat = st.text_area("4. 【What】發生什麼事 / 商品問題", value=str(row.get("客訴_What", "")), height=70)
-                                e_cwhy = st.text_area("5. 【Why】客訴背後原因", value=str(row.get("客訴_Why", "")), height=70)
-                                e_chow = st.text_area("6. 【How】解決方案與未來改善", value=str(row.get("客訴_How", "")), height=70)
-
-                                e_has_8d = st.checkbox("📄 附有 8D 報告", value=(row.get("有無8D") == "是"))
-                                e_new_8d_file = st.file_uploader("若要替換或補傳 8D 檔案請在此上傳 (不傳則保留原檔案)", type=["xlsx", "xls", "docx", "doc", "pdf"])
-
-                                save_edit_btn = st.form_submit_button("💾 儲存所有修改內容 (立即更新圖表與統計)", type="primary", use_container_width=True)
-
-                            if save_edit_btn:
-                                with st.spinner("🔄 正在更新回報資料並重新計算統計指標與折線圖..."):
-                                    # 只要包貨件數 > 0，無條件根據包貨起訖時間重新計算總分鐘數與單件耗時！
-                                    if e_pc > 0:
-                                        new_ps_str = e_ps.strftime("%H:%M")
-                                        new_pe_str = e_pe.strftime("%H:%M")
-                                        new_p_dur = calc_minutes(e_ps, e_pe)
-                                        new_min_per_p = round(new_p_dur / e_pc, 2)
-                                        new_pc_val = e_pc
-                                    else:
-                                        new_ps_str, new_pe_str = "無", "無"
-                                        new_p_dur, new_min_per_p, new_pc_val = 0, 0, 0
-
-                                    # 重新計算客服數據
-                                    if e_has_cs:
-                                        new_css_str = e_css.strftime("%H:%M")
-                                        new_cse_str = e_cse.strftime("%H:%M")
-                                        new_cs_dur = calc_minutes(e_css, e_cse)
-                                    else:
-                                        new_css_str, new_cse_str, new_cs_dur = "無", "無", 0
-
-                                    # 重新計算直播數據
-                                    if e_has_lv:
-                                        new_lvs_str = e_lvs.strftime("%H:%M")
-                                        new_lve_str = e_lve.strftime("%H:%M")
-                                        new_lv_dur = calc_minutes(e_lvs, e_lve)
-                                    else:
-                                        new_lvs_str, new_lve_str, new_lv_dur = "無", "無", 0
-
-                                    final_8d_flag = "是" if e_has_8d else "否"
-                                    final_8d_name = str(row.get("8D檔名", "")) if e_has_8d else ""
-                                    final_8d_b64 = str(row.get("8D檔案編碼", "")) if e_has_8d else ""
-                                    if e_has_8d and e_new_8d_file is not None:
-                                        final_8d_name = e_new_8d_file.name
-                                        final_8d_b64 = base64.b64encode(e_new_8d_file.read()).decode("utf-8")
-
-                                    clean_edate = normalize_date_str(e_date)
-                                    updated_dict = {
-                                        "回報單號": r_id,
-                                        "送出時間": str(row.get("送出時間", "")),
-                                        "回報日期": clean_edate,
-                                        "帳號": str(row.get("帳號", "")),
-                                        "姓名": e_name.strip(),
-                                        "上班時間": e_ws.strftime("%H:%M"),
-                                        "下班時間": e_we.strftime("%H:%M"),
-                                        "包貨開始": new_ps_str,
-                                        "包貨結束": new_pe_str,
-                                        "包貨件數": new_pc_val,
-                                        "包貨總分鐘": new_p_dur,
-                                        "單件包貨耗時(分)": new_min_per_p,
-                                        "客服開始": new_css_str,
-                                        "客服結束": new_cse_str,
-                                        "客服總分鐘": new_cs_dur,
-                                        "寄貨件數": e_sc,
-                                        "直播開始": new_lvs_str,
-                                        "直播結束": new_lve_str,
-                                        "直播總分鐘": new_lv_dur,
-                                        "有無客訴": e_has_comp,
-                                        "客訴_Who": e_cwho.strip() if e_has_comp == "有" else "",
-                                        "客訴_Where": e_cwhere if e_has_comp == "有" else "",
-                                        "客訴_When": e_cwhen.strip() if e_has_comp == "有" else "",
-                                        "客訴_What": e_cwhat.strip() if e_has_comp == "有" else "",
-                                        "客訴_Why": e_cwhy.strip() if e_has_comp == "有" else "",
-                                        "客訴_How": e_chow.strip() if e_has_comp == "有" else "",
-                                        "有無8D": final_8d_flag,
-                                        "8D檔名": final_8d_name,
-                                        "8D檔案編碼": final_8d_b64,
-                                        "今日處理事項": e_tasks.strip(),
-                                        "提案改善": e_prop.strip(),
-                                        "對同仁想法": e_peer.strip()
-                                    }
-
-                                    if write_report_dict_to_sheet(ws_reports, updated_dict, target_report_id=r_id):
-                                        sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
-                                        clear_all_caches()
+                            st.markdown("#### 📝 今日處理事項明細")
+                            tasks_text = str(row.get("今日處理事項", "")).strip()
+                            if tasks_text:
+                                for line in tasks_text.split("\n"):
+                                    st.markdown(f"- {line}")
+                            else:
+                                st.caption("無填寫內容")
+                                
+                            col_p1, col_p2 = st.columns(2)
+                            with col_p1:
+                                st.markdown("#### 💡 提案改善")
+                                prop_text = str(row.get("提案改善", "")).strip()
+                                if prop_text:
+                                    st.info(prop_text)
+                                else:
+                                    st.caption("無提案")
+                            with col_p2:
+                                st.markdown("#### 🤝 針對其他同仁想法")
+                                peer_text = str(row.get("對同仁想法", "")).strip()
+                                if peer_text:
+                                    st.warning(peer_text)
+                                else:
+                                    st.caption("無填寫")
+                                    
+                            if row.get("有無客訴") == "有":
+                                st.markdown("---")
+                                st.error("🚨 **客訴案件 5W1H 詳細報告**")
+                                st.markdown(f"- **1. 【Who】客人本名 + TK名：** {row.get('客訴_Who', '')}")
+                                st.markdown(f"- **2. 【Where】發生管道：** {row.get('客訴_Where', '')}")
+                                st.markdown(f"- **3. 【When】訂單與客訴日期：** {row.get('客訴_When', '')}")
+                                st.markdown(f"- **4. 【What】發生什麼事 / 商品問題：**\n  > {row.get('客訴_What', '')}")
+                                st.markdown(f"- **5. 【Why】客訴背後原因：**\n  > {row.get('客訴_Why', '')}")
+                                st.markdown(f"- **6. 【How】解決方案與未來改善：**\n  > {row.get('客訴_How', '')}")
+                                
+                            if row.get("有無8D") == "是" and row.get("8D檔案編碼"):
+                                st.markdown("---")
+                                b64_bytes = base64.b64decode(row["8D檔案編碼"])
+                                st.download_button(
+                                    label=f"📎 點擊下載 8D 報告檔案 ({row.get('8D檔名', '8D_report.xlsx')})",
+                                    data=b64_bytes,
+                                    file_name=f"8D_{r_id}_{row.get('8D檔名', 'report.xlsx')}",
+                                    key=f"dl_card_{r_id}"
+                                )
+                                
+                            st.markdown("---")
+                            foot_c1, foot_c2, foot_c3 = st.columns([2.5, 1.2, 1.3])
+                            foot_c1.caption(f"系統回報單號：{r_id} ｜ 實際送出時間 (台灣時間)：{row.get('送出時間', '')}")
+                            
+                            with foot_c2:
+                                if is_editing_this:
+                                    if st.button("❌ 收合修改面板", key=f"close_edit_{r_id}", use_container_width=True):
                                         st.session_state.edit_report_id = None
-                                        st.success(f"✅ 已成功修改 **{e_name} ({clean_edate})** 的回報內容！最新單件包貨耗時已更新為：**{new_min_per_p} 分/件**！")
                                         st.rerun()
-                                    else:
-                                        st.error("❌ 找不到該筆單號，無法更新，請重新整理網頁後再試。")
+                                else:
+                                    if st.button("✏️ 修改此筆回報內容", key=f"adm_edit_{r_id}", use_container_width=True):
+                                        st.session_state.edit_report_id = r_id
+                                        st.session_state.confirm_del_id = None
+                                        st.rerun()
+
+                            with foot_c3:
+                                if st.session_state.confirm_del_id == f"adm_{r_id}":
+                                    dc1, dc2 = st.columns(2)
+                                    if dc1.button("✅ 確定", key=f"yes_adm_{r_id}", type="primary", use_container_width=True):
+                                        if delete_report_by_id(ws_reports, ws_compact, ws_comp, r_id):
+                                            st.session_state.confirm_del_id = None
+                                            st.rerun()
+                                    if dc2.button("❌ 取消", key=f"no_adm_{r_id}", use_container_width=True):
+                                        st.session_state.confirm_del_id = None
+                                        st.rerun()
+                                else:
+                                    if st.button("🗑️ 刪除此筆回報紀錄", key=f"adm_del_{r_id}", use_container_width=True):
+                                        st.session_state.confirm_del_id = f"adm_{r_id}"
+                                        st.session_state.edit_report_id = None
+                                        st.rerun()
+
+                            if is_editing_this:
+                                st.markdown("---")
+                                with st.form(key=f"edit_form_{r_id}"):
+                                    e_col1, e_col2, e_col3, e_col4 = st.columns(4)
+                                    with e_col1:
+                                        e_date = st.date_input("📅 回報日期", parse_date_safe(row.get("回報日期", "")))
+                                    with e_col2:
+                                        e_name = st.text_input("👤 填表人姓名", value=str(row.get("姓名", "")))
+                                    with e_col3:
+                                        e_ws = st.time_input("🕒 上班時間", parse_time_safe(row.get("上班時間", "09:00"), datetime.time(9, 0)), step=60)
+                                    with e_col4:
+                                        e_we = st.time_input("🕕 下班時間", parse_time_safe(row.get("下班時間", "18:00"), datetime.time(18, 0)), step=60)
+
+                                    ep1, ep2, ep3, ep4 = st.columns(4)
+                                    with ep1:
+                                        e_ps = st.time_input("📦 包貨開始時間", parse_time_safe(row.get("包貨開始", "10:00"), datetime.time(10, 0)), step=60)
+                                    with ep2:
+                                        e_pe = st.time_input("📦 包貨結束時間", parse_time_safe(row.get("包貨結束", "12:00"), datetime.time(12, 0)), step=60)
+                                    with ep3:
+                                        e_pc = st.number_input("📦 包貨件數 (大於0自動算效率)", min_value=0, value=int(row.get("包貨件數", 0)), step=1)
+                                    with ep4:
+                                        e_sc = st.number_input("🚚 寄貨件數", min_value=0, value=int(row.get("寄貨件數", 0)), step=1)
+
+                                    ec1, ec2, ec3, ec4, ec5, ec6 = st.columns(6)
+                                    orig_has_cs = str(row.get("客服開始", "無")) not in ["無", ""]
+                                    orig_has_lv = str(row.get("直播開始", "無")) not in ["無", ""]
+                                    with ec1:
+                                        e_has_cs = st.checkbox("💬 當日有客服", value=orig_has_cs)
+                                    with ec2:
+                                        e_css = st.time_input("客服開始", parse_time_safe(row.get("客服開始", "09:00"), datetime.time(9, 0)), step=60)
+                                    with ec3:
+                                        e_cse = st.time_input("客服結束", parse_time_safe(row.get("客服結束", "18:00"), datetime.time(18, 0)), step=60)
+                                    with ec4:
+                                        e_has_lv = st.checkbox("🎥 當日有直播", value=orig_has_lv)
+                                    with ec5:
+                                        e_lvs = st.time_input("直播開始", parse_time_safe(row.get("直播開始", "19:00"), datetime.time(19, 0)), step=60)
+                                    with ec6:
+                                        e_lve = st.time_input("直播結束", parse_time_safe(row.get("直播結束", "22:00"), datetime.time(22, 0)), step=60)
+
+                                    e_tasks = st.text_area("今日處理事項明細 (一行一條)", value=str(row.get("今日處理事項", "")), height=100)
+                                    ep_col1, ep_col2 = st.columns(2)
+                                    with ep_col1:
+                                        e_prop = st.text_area("💡 提案改善", value=str(row.get("提案改善", "")))
+                                    with ep_col2:
+                                        e_peer = st.text_area("🤝 對其他同仁想法", value=str(row.get("對同仁想法", "")))
+
+                                    e_hc_col1, e_hc_col2 = st.columns(2)
+                                    with e_hc_col1:
+                                        e_has_comp = st.selectbox("有無客訴", ["無", "有"], index=1 if row.get("有無客訴") == "有" else 0)
+                                    with e_hc_col2:
+                                        where_opts = ["", "直播上", "LINE客服上", "LINE社群", "其他"]
+                                        curr_w = str(row.get("客訴_Where", ""))
+                                        w_idx = where_opts.index(curr_w) if curr_w in where_opts else 0
+                                        e_cwhere = st.selectbox("2. 【Where】發生管道", where_opts, index=w_idx)
+
+                                    ew1, ew2 = st.columns(2)
+                                    with ew1:
+                                        e_cwho = st.text_input("1. 【Who】客人本名 + TK名", value=str(row.get("客訴_Who", "")))
+                                    with ew2:
+                                        e_cwhen = st.text_input("3. 【When】訂單與客訴日期", value=str(row.get("客訴_When", "")))
+                                    e_cwhat = st.text_area("4. 【What】發生什麼事 / 商品問題", value=str(row.get("客訴_What", "")), height=60)
+                                    e_cwhy = st.text_area("5. 【Why】客訴背後原因", value=str(row.get("客訴_Why", "")), height=60)
+                                    e_chow = st.text_area("6. 【How】解決方案與未來改善", value=str(row.get("客訴_How", "")), height=60)
+
+                                    e_has_8d = st.checkbox("📄 附有 8D 報告", value=(row.get("有無8D") == "是"))
+                                    e_new_8d_file = st.file_uploader("若要替換或補傳 8D 檔案請在此上傳", type=["xlsx", "xls", "docx", "doc", "pdf"])
+
+                                    save_edit_btn = st.form_submit_button("💾 儲存所有修改內容 (立即更新圖表與統計)", type="primary", use_container_width=True)
+
+                                if save_edit_btn:
+                                    with st.spinner("🔄 正在更新回報資料並重新計算統計指標..."):
+                                        new_w_dur = calc_minutes(e_ws, e_we)
+                                        if e_pc > 0:
+                                            new_ps_str, new_pe_str = e_ps.strftime("%H:%M"), e_pe.strftime("%H:%M")
+                                            new_p_dur = calc_minutes(e_ps, e_pe)
+                                            new_min_per_p = round(new_p_dur / e_pc, 2)
+                                            new_pc_val = e_pc
+                                        else:
+                                            new_ps_str, new_pe_str = "無", "無"
+                                            new_p_dur, new_min_per_p, new_pc_val = 0, 0, 0
+
+                                        if e_has_cs:
+                                            new_css_str, new_cse_str = e_css.strftime("%H:%M"), e_cse.strftime("%H:%M")
+                                            new_cs_dur = calc_minutes(e_css, e_cse)
+                                        else:
+                                            new_css_str, new_cse_str, new_cs_dur = "無", "無", 0
+
+                                        if e_has_lv:
+                                            new_lvs_str, new_lve_str = e_lvs.strftime("%H:%M"), e_lve.strftime("%H:%M")
+                                            new_lv_dur = calc_minutes(e_lvs, e_lve)
+                                        else:
+                                            new_lvs_str, new_lve_str, new_lv_dur = "無", "無", 0
+
+                                        final_8d_flag = "是" if e_has_8d else "否"
+                                        final_8d_name = str(row.get("8D檔名", "")) if e_has_8d else ""
+                                        final_8d_b64 = str(row.get("8D檔案編碼", "")) if e_has_8d else ""
+                                        if e_has_8d and e_new_8d_file is not None:
+                                            final_8d_name = e_new_8d_file.name
+                                            final_8d_b64 = base64.b64encode(e_new_8d_file.read()).decode("utf-8")
+
+                                        clean_edate = normalize_date_str(e_date)
+                                        updated_dict = {
+                                            "回報單號": r_id,
+                                            "送出時間": str(row.get("送出時間", "")),
+                                            "回報日期": clean_edate,
+                                            "帳號": str(row.get("帳號", "")),
+                                            "姓名": e_name.strip(),
+                                            "上班時間": e_ws.strftime("%H:%M"),
+                                            "下班時間": e_we.strftime("%H:%M"),
+                                            "上班總分鐘": new_w_dur,
+                                            "包貨開始": new_ps_str,
+                                            "包貨結束": new_pe_str,
+                                            "包貨件數": new_pc_val,
+                                            "包貨總分鐘": new_p_dur,
+                                            "單件包貨耗時(分)": new_min_per_p,
+                                            "客服開始": new_css_str,
+                                            "客服結束": new_cse_str,
+                                            "客服總分鐘": new_cs_dur,
+                                            "寄貨件數": e_sc,
+                                            "直播開始": new_lvs_str,
+                                            "直播結束": new_lve_str,
+                                            "直播總分鐘": new_lv_dur,
+                                            "有無客訴": e_has_comp,
+                                            "客訴_Who": e_cwho.strip() if e_has_comp == "有" else "",
+                                            "客訴_Where": e_cwhere if e_has_comp == "有" else "",
+                                            "客訴_When": e_cwhen.strip() if e_has_comp == "有" else "",
+                                            "客訴_What": e_cwhat.strip() if e_has_comp == "有" else "",
+                                            "客訴_Why": e_cwhy.strip() if e_has_comp == "有" else "",
+                                            "客訴_How": e_chow.strip() if e_has_comp == "有" else "",
+                                            "有無8D": final_8d_flag,
+                                            "8D檔名": final_8d_name,
+                                            "8D檔案編碼": final_8d_b64,
+                                            "今日處理事項": e_tasks.strip(),
+                                            "提案改善": e_prop.strip(),
+                                            "對同仁想法": e_peer.strip()
+                                        }
+
+                                        if write_dict_to_sheet(ws_reports, REPORT_HEADERS, updated_dict, target_report_id=r_id):
+                                            sync_pretty_sheets(ws_reports, ws_compact, ws_comp)
+                                            clear_all_caches()
+                                            st.session_state.edit_report_id = None
+                                            st.rerun()
+
+        # ---------------------------------------------------------------------
+        # 分頁 2：操台部門後台（含當月上班總時數、操台時數自動結算與明細管理）
+        # ---------------------------------------------------------------------
+        with dept_tab2:
+            df_ct = load_caotai_df()
+            if df_ct.empty:
+                st.info("目前操台部門尚無任何回報資料。您可以先點選左側「🎛️ 操台部門 - 每日工作回報」測試送出一筆！")
+            else:
+                df_ct["上班總分鐘"] = df_ct.apply(lambda r: calc_minutes_str(r.get("上班時間", ""), r.get("下班時間", "")), axis=1)
+                df_ct["上班總時數(小時)"] = (df_ct["上班總分鐘"] / 60.0).round(2)
+                df_ct["操台時數(小時)"] = df_ct.apply(lambda r: parse_caotai_hours(r.get("操台時間", "")), axis=1)
+                df_ct["月份"] = df_ct["回報日期"].astype(str).str.slice(0, 7)
+
+                st.markdown("### 🔍 操台部門 - 月份與人員工時篩選器")
+                ct_f1, ct_f2 = st.columns(2)
+                with ct_f1:
+                    ct_months = ["全部月份"] + sorted(df_ct["月份"].unique().tolist(), reverse=True)
+                    sel_ct_month = st.selectbox("📅 選擇統計月份", ct_months, key="ct_m_top")
+                with ct_f2:
+                    ct_names = ["全部同仁"] + sorted(df_ct["姓名"].unique().tolist())
+                    sel_ct_name = st.selectbox("👤 選擇統計同仁", ct_names, key="ct_n_top")
+
+                f_ct_df = df_ct.copy()
+                if sel_ct_month != "全部月份":
+                    f_ct_df = f_ct_df[f_ct_df["月份"] == sel_ct_month]
+                if sel_ct_name != "全部同仁":
+                    f_ct_df = f_ct_df[f_ct_df["姓名"] == sel_ct_name]
+
+                tot_ct_days = len(f_ct_df)
+                tot_ct_work_hr = round(f_ct_df["上班總時數(小時)"].sum(), 2)
+                tot_ct_op_hr = round(f_ct_df["操台時數(小時)"].sum(), 2)
+                tot_ct_comp = int(f_ct_df["直播中客訴"].apply(lambda x: str(x).strip() not in ["無", ""]).sum())
+
+                ck1, ck2, ck3, ck4 = st.columns(4)
+                ck1.metric("📅 區間總出勤天數/次數", f"{tot_ct_days} 次")
+                ck2.metric("🕒 區間累計上班總時數", f"{tot_ct_work_hr} 小時")
+                ck3.metric("🎛️ 區間累計操台總時數", f"{tot_ct_op_hr} 小時")
+                ck4.metric("🚨 直播有客訴筆數", f"{tot_ct_comp} 筆")
+
+                st.divider()
+
+                st.subheader(f"📈 操台部門 - 各同仁當月上班總時數與統計總表 ({sel_ct_month} - {sel_ct_name})")
+                if not f_ct_df.empty:
+                    ct_summary_df = f_ct_df.groupby("姓名").agg(
+                        出勤回報天數=("回報單號", "count"),
+                        當月上班總時數_小時=("上班總時數(小時)", lambda x: round(x.sum(), 2)),
+                        平均每日上班時數_小時=("上班總時數(小時)", lambda x: round(x.mean(), 2)),
+                        當月操台總時數_小時=("操台時數(小時)", lambda x: round(x.sum(), 2)),
+                        直播客訴發生次數=("直播中客訴", lambda x: int((x.astype(str).str.strip() != "無") & (x.astype(str).str.strip() != "")).sum())
+                    ).reset_index()
+                    st.dataframe(ct_summary_df, use_container_width=True)
+
+                st.divider()
+
+                # 匯出操台部門美化版 Excel
+                st.subheader("📥 匯出操台部門美化版分頁 Excel 報表")
+                ct_dl1, ct_dl2 = st.columns([2, 1])
+
+                ct_export_df = pd.DataFrame({
+                    "回報日期": f_ct_df["回報日期"],
+                    "姓名": f_ct_df["姓名"],
+                    "工作機或賴名稱": f_ct_df["工作機或賴名稱"],
+                    "上班時間": f_ct_df["上班時間"],
+                    "下班時間": f_ct_df["下班時間"],
+                    "當日上班時數(小時)": f_ct_df["上班總時數(小時)"],
+                    "直播台名稱": f_ct_df["直播台名稱"],
+                    "直播台粉專網址": f_ct_df["直播台粉專網址"],
+                    "操台時間": f_ct_df["操台時間"],
+                    "操台時數(小時)": f_ct_df["操台時數(小時)"],
+                    "總留言/點讚/分享": f_ct_df["總留言_點讚_分享"],
+                    "直播需求": f_ct_df["直播需求"],
+                    "需求是否達成": f_ct_df["直播需求是否達成"],
+                    "直播中客訴": f_ct_df["直播中客訴"],
+                    "操台外處理事項": f_ct_df["操台外處理事項"],
+                    "整體操台感受": f_ct_df["直播台整體操台感受"],
+                    "提案改善": f_ct_df["提案改善"]
+                })
+
+                ct_output = io.BytesIO()
+                with pd.ExcelWriter(ct_output, engine="openpyxl") as writer:
+                    if not f_ct_df.empty:
+                        ct_summary_df.to_excel(writer, index=False, sheet_name="1_操台人員月度總工時統計")
+                    ct_export_df.to_excel(writer, index=False, sheet_name="2_操台每日回報明細")
+                    style_excel_File(writer)
+
+                safe_ct_p = sel_ct_month if ("全部" not in sel_ct_month) else "ALL"
+                with ct_dl1:
+                    st.download_button(
+                        label="📊 點擊下載【操台部門】工時統計與明細 Excel 報表 (.xlsx)",
+                        data=ct_output.getvalue(),
+                        file_name=f"Caotai_Report_{safe_ct_p}_{get_tw_today().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary",
+                        use_container_width=True
+                    )
+                with ct_dl2:
+                    if st.button("✨ 重新美化並同步操台 Google 試算表", key="sync_ct_btn", use_container_width=True):
+                        sync_caotai_pretty_sheet(ws_caotai, ws_caotai_compact, apply_style=True)
+                        clear_all_caches()
+                        st.success("✅ 已將線上『🎛️ 操台作業總覽』分頁重新排版上色並同步最新資料！")
+
+                st.divider()
+
+                # 操台部門詳細卡片檢視、修改與刪除
+                st.subheader("📋 操台部門 - 每日回報詳細內容檢視、修改與刪除管理")
+                cd1, cd2, cd3 = st.columns(3)
+                with cd1:
+                    ct_det_m = st.selectbox("📅 篩選月份", ct_months, index=ct_months.index(sel_ct_month), key="ct_dm")
+                with cd2:
+                    ct_det_n = st.selectbox("👤 篩選同仁", ct_names, index=ct_names.index(sel_ct_name), key="ct_dn")
+                
+                ct_detail_df = df_ct.copy()
+                if ct_det_m != "全部月份":
+                    ct_detail_df = ct_detail_df[ct_detail_df["月份"] == ct_det_m]
+                if ct_det_n != "全部同仁":
+                    ct_detail_df = ct_detail_df[ct_detail_df["姓名"] == ct_det_n]
+
+                with cd3:
+                    ct_avail_dates = ["全部日期"] + sorted(ct_detail_df["回報日期"].unique().tolist(), reverse=True)
+                    ct_det_d = st.selectbox("📆 篩選特定日期", ct_avail_dates, key="ct_dd")
+                if ct_det_d != "全部日期":
+                    ct_detail_df = ct_detail_df[ct_detail_df["回報日期"] == ct_det_d]
+
+                if ct_detail_df.empty:
+                    st.info("🔍 此篩選條件下無符合的操台回報紀錄。")
+                else:
+                    ct_sorted = ct_detail_df.sort_values(by=["回報日期", "送出時間"], ascending=[False, False]).reset_index(drop=True)
+                    for idx, row in ct_sorted.iterrows():
+                        r_id = row.get("回報單號", f"ct_{idx}")
+                        has_ct_comp = str(row.get("直播中客訴", "無")).strip() not in ["無", ""]
+                        comp_tag = " 🚨【有直播客訴】" if has_ct_comp else ""
+                        img_tag = " 📸【附截圖】" if row.get("需求截圖檔名") else ""
+                        exp_title = f"📅 {row.get('回報日期', '')} ｜ 👤 {row.get('姓名', '')} ｜ 🕒 上下班：{row.get('上班時間', '')}~{row.get('下班時間', '')} (工時：{row.get('上班總時數(小時)', 0)}H) ｜ 🎥 直播台：{row.get('直播台名稱', '')} ｜ ⏱️ 操台：{row.get('操台時間', '')}{comp_tag}{img_tag}"
+
+                        is_editing_ct = (st.session_state.edit_report_id == r_id)
+                        with st.expander(exp_title, expanded=(idx == 0 or is_editing_ct)):
+                            c1, c2, c3, c4 = st.columns(4)
+                            c1.markdown(f"**🕒 上下班時間 (當日工時)**\n\n`{row.get('上班時間', '')} ~ {row.get('下班時間', '')}` (**{row.get('上班總時數(小時)', 0)}** 小時)")
+                            c2.markdown(f"**📱 工作機或賴名稱**\n\n`{row.get('工作機或賴名稱', '')}`")
+                            c3.markdown(f"**🎥 直播台名稱 / 粉專**\n\n**{row.get('直播台名稱', '')}**\n({row.get('直播台粉專網址', '')})")
+                            c4.markdown(f"**⏱️ 操台時間 / 互動數據**\n\n操台：`{row.get('操台時間', '')}` ({row.get('操台時數(小時)', 0)}H)\n數據：`{row.get('總留言_點讚_分享', '')}`")
+
+                            st.markdown("---")
+                            r_c1, r_c2 = st.columns(2)
+                            with r_c1:
+                                st.markdown("#### 📋 直播需求")
+                                st.write(row.get("直播需求", ""))
+                                if row.get("需求截圖編碼"):
+                                    b64_img = base64.b64decode(row["需求截圖編碼"])
+                                    st.download_button(
+                                        label=f"📸 下載直播需求截圖 ({row.get('需求截圖檔名', 'image.png')})",
+                                        data=b64_img,
+                                        file_name=f"{r_id}_{row.get('需求截圖檔名', 'image.png')}",
+                                        key=f"dl_ct_img_{r_id}"
+                                    )
+                            with r_c2:
+                                st.markdown("#### ✅ 直播需求是否達成")
+                                st.write(row.get("直播需求是否達成", ""))
+
+                            st.markdown("---")
+                            o_c1, o_c2 = st.columns(2)
+                            with o_c1:
+                                st.markdown("#### 🛠️ 操台外處理事項")
+                                st.write(row.get("操台外處理事項", ""))
+                            with o_c2:
+                                st.markdown("#### 🚨 直播中客訴")
+                                if has_ct_comp:
+                                    st.error(row.get("直播中客訴", ""))
+                                else:
+                                    st.caption("無")
+
+                            f_c1, f_c2 = st.columns(2)
+                            with f_c1:
+                                st.markdown("#### 💬 直播台整體操台感受")
+                                st.info(row.get("直播台整體操台感受", ""))
+                            with f_c2:
+                                st.markdown("#### 💡 提案改善 (主管專屬悄悄話)")
+                                st.warning(row.get("提案改善", "無"))
+
+                            st.markdown("---")
+                            fc1, fc2, fc3 = st.columns([2.5, 1.2, 1.3])
+                            fc1.caption(f"系統回報單號：{r_id} ｜ 實際送出時間 (台灣時間)：{row.get('送出時間', '')}")
+                            with fc2:
+                                if is_editing_ct:
+                                    if st.button("❌ 收合修改面板", key=f"close_ct_edit_{r_id}", use_container_width=True):
+                                        st.session_state.edit_report_id = None
+                                        st.rerun()
+                                else:
+                                    if st.button("✏️ 修改此筆操台回報", key=f"ct_edit_{r_id}", use_container_width=True):
+                                        st.session_state.edit_report_id = r_id
+                                        st.session_state.confirm_del_id = None
+                                        st.rerun()
+                            with fc3:
+                                if st.session_state.confirm_del_id == f"adm_ct_{r_id}":
+                                    dc1, dc2 = st.columns(2)
+                                    if dc1.button("✅ 確定", key=f"yes_ct_{r_id}", type="primary", use_container_width=True):
+                                        if delete_caotai_by_id(ws_caotai, ws_caotai_compact, r_id):
+                                            st.session_state.confirm_del_id = None
+                                            st.rerun()
+                                    if dc2.button("❌ 取消", key=f"no_ct_{r_id}", use_container_width=True):
+                                        st.session_state.confirm_del_id = None
+                                        st.rerun()
+                                else:
+                                    if st.button("🗑️ 刪除此筆操台回報", key=f"ct_del_{r_id}", use_container_width=True):
+                                        st.session_state.confirm_del_id = f"adm_ct_{r_id}"
+                                        st.session_state.edit_report_id = None
+                                        st.rerun()
+
+                            if is_editing_ct:
+                                st.markdown("---")
+                                with st.form(key=f"edit_ct_form_{r_id}"):
+                                    ec1, ec2, ec3, ec4 = st.columns(4)
+                                    with ec1:
+                                        ed_ct_date = st.date_input("📅 日期", parse_date_safe(row.get("回報日期", "")))
+                                    with ec2:
+                                        ed_ct_name = st.text_input("👤 姓名", value=str(row.get("姓名", "")))
+                                    with ec3:
+                                        ed_ct_ws = st.time_input("🕒 上班時間", parse_time_safe(row.get("上班時間", "13:00")), step=60)
+                                    with ec4:
+                                        ed_ct_we = st.time_input("🕕 下班時間", parse_time_safe(row.get("下班時間", "22:00")), step=60)
+
+                                    ec5, ec6, ec7 = st.columns(3)
+                                    with ec5:
+                                        ed_ct_dev = st.text_input("📱 工作機或賴名稱", value=str(row.get("工作機或賴名稱", "")))
+                                    with ec6:
+                                        ed_ct_sname = st.text_input("🎥 直播台名稱", value=str(row.get("直播台名稱", "")))
+                                    with ec7:
+                                        ed_ct_furl = st.text_input("🔗 直播台粉專網址", value=str(row.get("直播台粉專網址", "")))
+
+                                    ec8, ec9 = st.columns(2)
+                                    with ec8:
+                                        ed_ct_optime = st.text_input("⏱️ 操台時間", value=str(row.get("操台時間", "")))
+                                    with ec9:
+                                        ed_ct_metrics = st.text_input("📊 總留言量、總點讚、總分享", value=str(row.get("總留言_點讚_分享", "")))
+
+                                    ed_ct_req = st.text_area("📋 直播需求", value=str(row.get("直播需求", "")), height=70)
+                                    ed_ct_met = st.text_area("✅ 直播需求是否達成", value=str(row.get("直播需求是否達成", "")), height=60)
+                                    ed_ct_comp = st.text_area("🚨 直播中客訴", value=str(row.get("直播中客訴", "")), height=60)
+                                    ed_ct_other = st.text_area("🛠️ 操台外處理事項", value=str(row.get("操台外處理事項", "")), height=60)
+                                    ed_ct_feel = st.text_area("💬 直播台整體操台感受", value=str(row.get("直播台整體操台感受", "")), height=60)
+                                    ed_ct_prop = st.text_area("💡 提案改善", value=str(row.get("提案改善", "")), height=60)
+
+                                    save_ct_btn = st.form_submit_button("💾 儲存操台修改內容 (自動重算工時)", type="primary", use_container_width=True)
+
+                                if save_ct_btn:
+                                    with st.spinner("🔄 正在更新操台回報並重新計算工時..."):
+                                        new_w_m = calc_minutes(ed_ct_ws, ed_ct_we)
+                                        new_w_h = round(new_w_m / 60.0, 2)
+                                        new_op_h = parse_caotai_hours(ed_ct_optime)
+                                        clean_ct_d = normalize_date_str(ed_ct_date)
+
+                                        upd_ct_dict = {
+                                            "回報單號": r_id,
+                                            "送出時間": str(row.get("送出時間", "")),
+                                            "回報日期": clean_ct_d,
+                                            "帳號": str(row.get("帳號", "")),
+                                            "姓名": ed_ct_name.strip(),
+                                            "工作機或賴名稱": ed_ct_dev.strip(),
+                                            "上班時間": ed_ct_ws.strftime("%H:%M"),
+                                            "下班時間": ed_ct_we.strftime("%H:%M"),
+                                            "上班總分鐘": new_w_m,
+                                            "上班總時數(小時)": new_w_h,
+                                            "直播台名稱": ed_ct_sname.strip(),
+                                            "直播台粉專網址": ed_ct_furl.strip(),
+                                            "操台時間": ed_ct_optime.strip(),
+                                            "操台時數(小時)": new_op_h,
+                                            "總留言_點讚_分享": ed_ct_metrics.strip(),
+                                            "直播需求": ed_ct_req.strip(),
+                                            "直播需求是否達成": ed_ct_met.strip(),
+                                            "直播中客訴": ed_ct_comp.strip(),
+                                            "操台外處理事項": ed_ct_other.strip(),
+                                            "直播台整體操台感受": ed_ct_feel.strip(),
+                                            "提案改善": ed_ct_prop.strip(),
+                                            "需求截圖檔名": str(row.get("需求截圖檔名", "")),
+                                            "需求截圖編碼": str(row.get("需求截圖編碼", ""))
+                                        }
+
+                                        if write_dict_to_sheet(ws_caotai, CAOTAI_HEADERS, upd_ct_dict, target_report_id=r_id):
+                                            sync_caotai_pretty_sheet(ws_caotai, ws_caotai_compact)
+                                            clear_all_caches()
+                                            st.session_state.edit_report_id = None
+                                            st.rerun()
