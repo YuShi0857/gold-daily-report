@@ -55,14 +55,14 @@ COMPLAINT_HEADERS = [
     "6.解決與改善(How)", "有無附8D報告", "8D檔案名稱", "回報單號"
 ]
 
-# 操台部門標題 (含 5W1H 客訴與 8D 報告結構)
+# 操台部門標題 (含「主管提醒改善事項」、5W1H 客訴與 8D 報告結構)
 CAOTAI_HEADERS = [
     "回報單號", "送出時間", "回報日期", "帳號", "姓名",
     "工作機或賴名稱", "上班時間", "下班時間", "上班總分鐘", "上班總時數(小時)",
     "直播台名稱", "直播台粉專網址", "操台時間", "操台時數(小時)",
     "總留言_點讚_分享", "直播需求", "直播需求是否達成",
     "有無客訴", "客訴_Who", "客訴_Where", "客訴_When", "客訴_What", "客訴_Why", "客訴_How",
-    "直播中客訴", "操台外處理事項", "直播台整體操台感受", "提案改善",
+    "直播中客訴", "操台外處理事項", "直播台整體操台感受", "主管提醒改善事項", "提案改善",
     "需求截圖檔名", "需求截圖編碼", "有無8D", "8D檔名", "8D檔案編碼"
 ]
 
@@ -70,13 +70,13 @@ CAOTAI_COMPACT_HEADERS = [
     "回報日期", "姓名", "工作機/賴名稱", "上下班時間(當日工時)",
     "直播台名稱", "操台時間(時數)", "留言/點讚/分享",
     "直播需求", "是否達成", "有無客訴", "操台外處理事項",
-    "整體操台感受", "提案改善", "回報單號"
+    "整體操台感受", "主管提醒改善事項", "提案改善", "回報單號"
 ]
 
 CAOTAI_COMPLAINT_HEADERS = [
     "回報日期", "填表同仁", "1.操台人員(Who)", "2.直播台名稱(Where)", 
     "3.發生時間點_賴群反映(When)", "4.客訴問題詳情(What)", "5.背後原因分析(Why)", 
-    "6.解決與改善(How)", "有無附8D報告", "8D檔案名稱", "回報單號"
+    "6.處理方式與結果(How)", "有無附8D報告", "8D檔案名稱", "回報單號"
 ]
 
 EN_TO_ZH_MAP = {
@@ -237,7 +237,7 @@ def get_worksheets_cached():
     try:
         ws_caotai = sh.worksheet("caotai_reports")
     except:
-        ws_caotai = sh.add_worksheet(title="caotai_reports", rows="1000", cols="35")
+        ws_caotai = sh.add_worksheet(title="caotai_reports", rows="1000", cols="36")
         ws_caotai.append_row(CAOTAI_HEADERS)
         try:
             ws_caotai.hide()
@@ -247,7 +247,7 @@ def get_worksheets_cached():
     try:
         ws_caotai_compact = sh.worksheet("🎛️ 操台作業總覽")
     except:
-        ws_caotai_compact = sh.add_worksheet(title="🎛️ 操台作業總覽", rows="1000", cols="16")
+        ws_caotai_compact = sh.add_worksheet(title="🎛️ 操台作業總覽", rows="1000", cols="17")
         ws_caotai_compact.append_row(CAOTAI_COMPACT_HEADERS)
         beautify_google_sheet(ws_caotai_compact, len(CAOTAI_COMPACT_HEADERS))
 
@@ -430,6 +430,7 @@ def sync_caotai_pretty_sheet(ws_caotai, ws_caotai_compact, ws_caotai_comp, apply
                 "有" if has_c else "無",
                 str(r.get("操台外處理事項", "")),
                 str(r.get("直播台整體操台感受", "")),
+                str(r.get("主管提醒改善事項", "")) or "無",
                 str(r.get("提案改善", "")),
                 str(r.get("回報單號", ""))
             ])
@@ -816,7 +817,6 @@ else:
         st.markdown("#### 三、 📝 今日處理事項明細")
         st.caption("請填寫幾點幾分到幾點幾分做了哪些事（空白未填的列會自動忽略，正上方與正下方皆可隨時增減列數）")
 
-        # 處理事項【正上方】加減按鈕
         gt_b1, gt_b2, _ = st.columns([1.5, 1.5, 4])
         with gt_b1:
             if st.button(f"➕ 新增一列處理事項 (目前 {st.session_state.task_rows} 列)", key="g_add_top", use_container_width=True):
@@ -840,7 +840,6 @@ else:
                 td = st.text_input(f"處理事項內容 #{i+1}", placeholder="請輸入該時段具體完成的事項（無則留空即可）...", key=f"td_{fv}_{i}")
             raw_tasks_inputs.append((ts, te, td))
 
-        # 處理事項【正下方】加減按鈕（填完最後一列直接按，免往上滑！）
         gb_b1, gb_b2, _ = st.columns([1.5, 1.5, 4])
         with gb_b1:
             if st.button("➕ 在下方繼續新增一列", key="g_add_bot", use_container_width=True):
@@ -967,7 +966,7 @@ else:
                                     st.rerun()
 
     # =========================================================================
-    # ---------------- 功能 A2：操台部門 - 每日工作回報 (加減按鈕位於該區塊正上方與正下方) ----------------
+    # ---------------- 功能 A2：操台部門 - 每日工作回報 (含新增「主管提醒改善事項」) ----------------
     # =========================================================================
     elif choice == "🎛️ 操台部門 - 每日工作回報":
         st.title("🎛️ 操台部門 - 每日工作回報單")
@@ -1067,14 +1066,13 @@ else:
             st.markdown("#### 📄 重大異常 8D 報告檔案上傳")
             ct_uploaded_8d = st.file_uploader("請上傳填妥之 8D 檔案 (支援 Excel, Word, PDF，建議小於 1MB)", type=["xlsx", "xls", "docx", "doc", "pdf"], key=f"ct_u8d_{fv}")
 
-        # 四、操台外處理事項明細（加減按鈕直接放在該欄位區塊的正上方與正下方！）
+        # 四、操台外處理事項明細（加減按鈕直接放在該欄位區塊的正上方與正下方）
         ct_raw_tasks_inputs = []
         if ct_has_other_chk:
             st.divider()
             st.markdown("#### 四、 🛠️ 操台外處理事項明細")
             st.caption("請依照上班時間軸清楚標註幾點幾分到幾點幾分做了哪些事（空白未填的列會自動忽略，正上方與正下方皆可直接點擊增減列數）")
 
-            # 【正上方】加減按鈕
             ct_top_b1, ct_top_b2, _ = st.columns([1.6, 1.4, 4])
             with ct_top_b1:
                 if st.button(f"➕ 新增一列操台外事項 (目前 {st.session_state.ct_task_rows} 列)", key="ct_add_top", use_container_width=True):
@@ -1097,7 +1095,6 @@ else:
                     ctd = st.text_input(f"操台外處理事項內容 #{i+1}", placeholder="請輸入該時段具體完成的操台外事項（無則留空即可）...", key=f"ct_td_{fv}_{i}")
                 ct_raw_tasks_inputs.append((cts, cte, ctd))
 
-            # 【正下方】加減按鈕（填完最後一列直接按，完全不用往上滑！）
             ct_bot_b1, ct_bot_b2, _ = st.columns([1.6, 1.4, 4])
             with ct_bot_b1:
                 if st.button("➕ 在下方繼續新增一列", key="ct_add_bot", use_container_width=True):
@@ -1109,7 +1106,7 @@ else:
                     st.rerun()
 
         st.divider()
-        st.markdown("#### 五、 💬 整體操台感受與提案改善")
+        st.markdown("#### 五、 💬 整體操台感受、主管提醒與提案改善")
         ct_feeling = st.text_area(
             "💬 直播台整體操台感受 *",
             placeholder="請詳述整體節奏、客人加單狀況、客人互動狀況、直播客人熱絡度等等，有任何想法都直接打上來尤其是自己的台",
@@ -1117,6 +1114,14 @@ else:
             key=f"ct_feel_{fv}"
         )
         st.caption("請詳述整體節奏、客人加單狀況、客人互動狀況、直播客人熱絡度等等，有任何想法都直接打上來尤其是自己的台")
+
+        ct_sup_remind = st.text_area(
+            "📌 主管提醒改善事項 *",
+            placeholder="請填寫主管提醒需改善與注意之事項與執行狀況（若無請填無）...",
+            height=90,
+            key=f"ct_sup_{fv}"
+        )
+        st.caption("請記錄主管提醒需注意或改善之事項與目前執行狀況，若無請直接打無")
 
         ct_proposal = st.text_area(
             "💡 提案改善",
@@ -1143,10 +1148,10 @@ else:
             required_fields = [
                 ct_device.strip(), ct_stream_name.strip(), ct_fanpage_url.strip(),
                 ct_op_time.strip(), ct_metrics.strip(), ct_req.strip(),
-                ct_req_met.strip(), ct_feeling.strip()
+                ct_req_met.strip(), ct_feeling.strip(), ct_sup_remind.strip()
             ]
             if not all(required_fields):
-                st.error("❌ 標註「*」號的題目皆為必填！（您剛才打的字都還保留在上方框內，補齊後再按送出即可）")
+                st.error("❌ 標註「*」號的題目皆為必填！（若無主管提醒改善事項，請在框內輸入『無』，您剛才打的字都還保留在上方框內，補齊後再按送出即可）")
             elif ct_has_other_chk and not ct_tasks_list:
                 st.error("❌ 您勾選了「今日有操台外處理事項」，請至少填寫一列處理事項！（若遠端無操台外協助，請取消上方『今日有操台外處理事項』勾選即可）")
             elif ct_has_comp_chk and not all([ct_c_who.strip(), ct_c_where.strip(), ct_c_when.strip(), ct_c_what.strip(), ct_c_why.strip(), ct_c_how.strip()]):
@@ -1201,6 +1206,7 @@ else:
                         "直播中客訴": summary_comp_str,
                         "操台外處理事項": "\n".join(ct_tasks_list),
                         "直播台整體操台感受": ct_feeling.strip(),
+                        "主管提醒改善事項": ct_sup_remind.strip(),
                         "提案改善": ct_proposal.strip() or "無",
                         "需求截圖檔名": img_name,
                         "需求截圖編碼": img_b64,
@@ -1939,6 +1945,8 @@ else:
             if df_ct.empty:
                 st.info("目前操台部門尚無任何回報資料。您可以先點選左側「🎛️ 操台部門 - 每日工作回報」測試送出一筆！")
             else:
+                if "主管提醒改善事項" not in df_ct.columns:
+                    df_ct["主管提醒改善事項"] = "無"
                 df_ct["上班總分鐘"] = df_ct.apply(lambda r: calc_minutes_str(r.get("上班時間", ""), r.get("下班時間", "")), axis=1)
                 df_ct["上班總時數(小時)"] = (df_ct["上班總分鐘"] / 60.0).round(2)
                 df_ct["操台時數(小時)"] = df_ct.apply(lambda r: parse_caotai_hours(r.get("操台時間", "")), axis=1)
@@ -2006,6 +2014,7 @@ else:
                     "有無客訴": f_ct_df["判定有客訴"].apply(lambda x: "有" if x else "無"),
                     "操台外處理事項": f_ct_df["操台外處理事項"],
                     "整體操台感受": f_ct_df["直播台整體操台感受"],
+                    "主管提醒改善事項": f_ct_df["主管提醒改善事項"],
                     "提案改善": f_ct_df["提案改善"]
                 })
 
@@ -2144,11 +2153,14 @@ else:
                                 )
 
                             st.markdown("---")
-                            f_c1, f_c2 = st.columns(2)
+                            f_c1, f_c2, f_c3 = st.columns(3)
                             with f_c1:
                                 st.markdown("#### 💬 直播台整體操台感受")
                                 st.info(row.get("直播台整體操台感受", ""))
                             with f_c2:
+                                st.markdown("#### 📌 主管提醒改善事項")
+                                st.success(row.get("主管提醒改善事項", "") or "無")
+                            with f_c3:
                                 st.markdown("#### 💡 提案改善 (主管專屬悄悄話)")
                                 st.warning(row.get("提案改善", "無"))
 
@@ -2229,6 +2241,7 @@ else:
 
                                     ed_ct_other = st.text_area("🛠️ 操台外處理事項 (一行一條)", value=str(row.get("操台外處理事項", "")), height=80)
                                     ed_ct_feel = st.text_area("💬 直播台整體操台感受", value=str(row.get("直播台整體操台感受", "")), height=60)
+                                    ed_ct_sup = st.text_area("📌 主管提醒改善事項", value=str(row.get("主管提醒改善事項", "")) or "無", height=60)
                                     ed_ct_prop = st.text_area("💡 提案改善", value=str(row.get("提案改善", "")), height=60)
 
                                     save_ct_btn = st.form_submit_button("💾 儲存操台修改內容 (自動重算工時)", type="primary", use_container_width=True)
@@ -2277,6 +2290,7 @@ else:
                                             "直播中客訴": new_comp_sum,
                                             "操台外處理事項": ed_ct_other.strip(),
                                             "直播台整體操台感受": ed_ct_feel.strip(),
+                                            "主管提醒改善事項": ed_ct_sup.strip() or "無",
                                             "提案改善": ed_ct_prop.strip(),
                                             "需求截圖檔名": str(row.get("需求截圖檔名", "")),
                                             "需求截圖編碼": str(row.get("需求截圖編碼", "")),
