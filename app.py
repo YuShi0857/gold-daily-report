@@ -15,8 +15,8 @@ import re
 import plotly.express as px
 from openpyxl.styles import Font, PatternFill, Alignment
 
-# 頁面基本設定
-st.set_page_config(page_title="企業雙部門工作回報系統", layout="wide", page_icon="✨")
+# 頁面基本設定（已改為「每日工作回報系統」，供瀏覽器分頁與 LINE 連結預覽抓取）
+st.set_page_config(page_title="每日工作回報系統", layout="wide", page_icon="📝")
 
 # 設定台灣標準時區 (UTC+8)
 TW_TZ = datetime.timezone(datetime.timedelta(hours=8))
@@ -537,7 +537,7 @@ def send_reset_email(receiver_email, new_pass):
         sender_email = st.secrets["smtp"]["sender_email"]
         sender_password = st.secrets["smtp"]["app_password"]
 
-        msg = MIMEText(f"您好，\n\n您的「工作回報系統」密碼已重設。\n您的臨時新密碼為：{new_pass}\n\n請使用此密碼登入後，立即至左側選單「修改密碼」更新您的密碼。", "plain", "utf-8")
+        msg = MIMEText(f"您好，\n\n您的「每日工作回報系統」密碼已重設。\n您的臨時新密碼為：{new_pass}\n\n請使用此密碼登入後，立即至左側選單「修改密碼」更新您的密碼。", "plain", "utf-8")
         msg["Subject"] = "【系統通知】每日工作回報系統 - 密碼重設"
         msg["From"] = sender_email
         msg["To"] = receiver_email
@@ -593,7 +593,7 @@ if not st.session_state.logged_in:
 
 # ================= 4. 未登入畫面 =================
 if not st.session_state.logged_in:
-    st.title("✨ 企業雙部門工作回報系統（黃金部門 ＆ 操台部門）")
+    st.title("📝 每日工作回報系統")
     tab1, tab2, tab3 = st.tabs(["🔑 登入系統", "📝 新人註冊", "❓ 忘記密碼"])
     
     with tab1:
@@ -966,7 +966,7 @@ else:
                                     st.rerun()
 
     # =========================================================================
-    # ---------------- 功能 A2：操台部門 - 每日工作回報 (含新增「主管提醒改善事項」) ----------------
+    # ---------------- 功能 A2：操台部門 - 每日工作回報 ----------------
     # =========================================================================
     elif choice == "🎛️ 操台部門 - 每日工作回報":
         st.title("🎛️ 操台部門 - 每日工作回報單")
@@ -1066,7 +1066,7 @@ else:
             st.markdown("#### 📄 重大異常 8D 報告檔案上傳")
             ct_uploaded_8d = st.file_uploader("請上傳填妥之 8D 檔案 (支援 Excel, Word, PDF，建議小於 1MB)", type=["xlsx", "xls", "docx", "doc", "pdf"], key=f"ct_u8d_{fv}")
 
-        # 四、操台外處理事項明細（加減按鈕直接放在該欄位區塊的正上方與正下方）
+        # 四、操台外處理事項明細
         ct_raw_tasks_inputs = []
         if ct_has_other_chk:
             st.divider()
