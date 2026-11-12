@@ -12,11 +12,22 @@ import io
 import base64
 import time
 import re
+import json
 import plotly.express as px
 from openpyxl.styles import Font, PatternFill, Alignment
 
-# 頁面基本設定（已改為「每日工作回報系統」，供瀏覽器分頁與 LINE 連結預覽抓取）
+# 頁面基本設定
 st.set_page_config(page_title="每日工作回報系統", layout="wide", page_icon="📝")
+
+# 隱藏右上角選單、頂部列與部署按鈕，防止員工連回公開作品集頁面
+st.markdown("""
+    <style>
+    #MainMenu {visibility: hidden;}
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+    .stAppDeployButton {display: none;}
+    </style>
+""", unsafe_allow_html=True)
 
 # 設定台灣標準時區 (UTC+8)
 TW_TZ = datetime.timezone(datetime.timedelta(hours=8))
@@ -55,7 +66,7 @@ COMPLAINT_HEADERS = [
     "6.解決與改善(How)", "有無附8D報告", "8D檔案名稱", "回報單號"
 ]
 
-# 操台部門標題 (含「主管提醒改善事項」、5W1H 客訴與 8D 報告結構)
+# 操台部門標題
 CAOTAI_HEADERS = [
     "回報單號", "送出時間", "回報日期", "帳號", "姓名",
     "工作機或賴名稱", "上班時間", "下班時間", "上班總分鐘", "上班總時數(小時)",
@@ -126,7 +137,8 @@ def calc_minutes_str(s1, s2):
     except:
         return 0
 
-def parse_caotai_hours(text):
+def parse_single_op_hours(text):
+    """解析單一直播台的操台時數"""
     if not text or str(text).strip() in ["無", ""]:
         return 0.0
     s = str(text)
@@ -138,6 +150,13 @@ def parse_caotai_hours(text):
         total_m = sum(calc_minutes_str(t1, t2) for t1, t2 in t_matches)
         return round(total_m / 60.0, 2)
     return 0.0
+
+def parse_caotai_hours(text):
+    """支援多行/多直播台操台時間的自動時數加總"""
+    if not text or str(text).strip() in ["無", ""]:
+        return 0.0
+    lines = [line.strip() for line in str(text).split("\n") if line.strip()]
+    return round(sum(parse_single_op_hours(line) for line in lines), 2)
 
 def is_caotai_row_complaint(r):
     if str(r.get("有無客訴", "")).strip() == "有":
@@ -560,6 +579,8 @@ if "task_rows" not in st.session_state:
     st.session_state.task_rows = 3
 if "ct_task_rows" not in st.session_state:
     st.session_state.ct_task_rows = 3
+if "ct_stream_rows" not in st.session_state:
+    st.session_state.ct_stream_rows = 1
 if "form_ver" not in st.session_state:
     st.session_state.form_ver = 0
 if "submit_success_msg" not in st.session_state:
@@ -966,7 +987,7 @@ else:
                                     st.rerun()
 
     # =========================================================================
-    # ---------------- 功能 A2：操台部門 - 每日工作回報 ----------------
+    # ---------------- 功能 A2：操台部門 - 每日工作回報 (支援多台動態新增 & 自動前綴台名) ----------------
     # =========================================================================
     elif choice == "🎛️ 操台部門 - 每日工作回報":
         st.title("🎛️ 操台部門 - 每日工作回報單")
@@ -976,7 +997,7 @@ else:
             st.success(st.session_state.submit_success_msg)
             st.session_state.submit_success_msg = ""
 
-        st.info(f"📌 填表人：**{user['name']}** （已自動綁定姓名） ｜ ⏱️ 系統將根據您的上下班時間與操台時間，**自動計算當日與當月累計上班時數**！")
+        st.info(f"📌 填表人：**{user['name']}** （已自動綁定姓名） ｜ ⏱️ 系統將根據您的上下班時間與各台操台時間，**自動計算當日與當月累計上班時數**！")
         
         fv = st.session_state.form_ver
         st.markdown("### 📌 步驟一：請先勾選今日是否有客訴或操台外處理事項")
@@ -1010,50 +1031,121 @@ else:
             st.caption("⚠️ 不可湊整，請務必與打卡紙上相同 (遠端人員請務必與下機時間相同)")
 
         st.divider()
-        st.markdown("#### 二、 直播操台數據與需求紀錄")
-        s_c1, s_c2 = st.columns(2)
-        with s_c1:
-            ct_stream_name = st.text_input("🎥 直播台名稱 *", placeholder="請輸入直播台名稱", key=f"ct_sn_{fv}")
-        with s_c2:
-            ct_fanpage_url = st.text_input("🔗 直播台粉專網址 *", placeholder="如果有兩台請備註直播台對應粉專", key=f"ct_fu_{fv}")
-            st.caption("如果有兩台請備註直播台對應粉專")
+        # 二、動態多台直播操台數據與需求紀錄區塊
+        st.markdown("#### 二、 直播操台數據與需求紀錄（可依實際操台數量往下新增直播台）")
+        st.caption("💡 只要輸入『直播台名稱』並按 Enter，右方『總留言量、總點讚、總分享』前方就會自動帶出該直播台名稱，您只需填寫數字（如：8553-523-325）即可！")
 
-        m_c1, m_c2 = st.columns(2)
-        with m_c1:
-            ct_op_time = st.text_input("⏱️ 操台時間 *", placeholder="格式範例：21:06-23:33(2.5H)", key=f"ct_opt_{fv}")
-            st.caption("格式範例：21:06-23:33(2.5H)，如果有兩台請備註直播台對應時間")
-        with m_c2:
-            ct_metrics = st.text_input("📊 總留言量、總點讚、總分享 *", placeholder="格式：廣天-8553-523-325", key=f"ct_met_{fv}")
-            st.caption("有多個直播台請備註各自數量 (格式：廣天-8553-523-325)")
+        st_top_b1, st_top_b2, _ = st.columns([1.8, 1.4, 3.8])
+        with st_top_b1:
+            if st.button(f"➕ 新增一台直播台 (目前共 {st.session_state.ct_stream_rows} 台)", key="st_add_top", use_container_width=True):
+                st.session_state.ct_stream_rows += 1
+                st.rerun()
+        with st_top_b2:
+            if st.button("➖ 移除最後一台", key="st_sub_top", disabled=(st.session_state.ct_stream_rows <= 1), use_container_width=True):
+                st.session_state.ct_stream_rows = max(1, st.session_state.ct_stream_rows - 1)
+                st.rerun()
 
-        ct_req = st.text_area(
-            "📋 直播需求 *",
-            placeholder="請詳細說明直播需求，禁止只打加單關鍵字反饋互動；如果有不同直播台請分開備註...",
-            height=100,
-            key=f"ct_req_{fv}"
-        )
-        st.caption("請詳細說明直播需求禁止只打加單關鍵字反饋互動，如果每日工作回報內台性那需要調整，就直接協助新增並附上截圖。如果有不同直播台請分開備註")
-        ct_req_img = st.file_uploader("📸 附上直播需求調整截圖 (選填，支援圖片或PDF)", type=["png", "jpg", "jpeg", "pdf"], key=f"ct_rimg_{fv}")
+        stream_entries = []
+        for s_idx in range(st.session_state.ct_stream_rows):
+            with st.container(border=True):
+                st.markdown(f"##### 🎬 第 {s_idx + 1} 台直播操台紀錄")
+                sc1, sc2 = st.columns(2)
+                with sc1:
+                    s_name = st.text_input(
+                        f"🎥 直播台名稱 #{s_idx+1} *",
+                        placeholder="請輸入直播台名稱（例如：廣天）",
+                        key=f"ct_sn_{fv}_{s_idx}"
+                    )
+                with sc2:
+                    s_url = st.text_input(
+                        f"🔗 直播台粉專網址 #{s_idx+1} *",
+                        placeholder="請貼上該直播台對應粉專網址",
+                        key=f"ct_fu_{fv}_{s_idx}"
+                    )
 
-        ct_req_met = st.text_area(
-            "✅ 直播需求是否達成 *",
-            placeholder="請依上題所述需求詳細說明，如未達成請詳述原因...",
-            height=80,
-            key=f"ct_rmet_{fv}"
-        )
-        st.caption("請依上題所述需求詳細說明，如未達成請詳述原因")
+                mc1, mc2 = st.columns(2)
+                with mc1:
+                    s_opt = st.text_input(
+                        f"⏱️ 操台時間 #{s_idx+1} *",
+                        placeholder="格式範例：21:06-23:33(2.5H)",
+                        key=f"ct_opt_{fv}_{s_idx}"
+                    )
+                    st.caption("格式範例：21:06-23:33(2.5H)")
+                with mc2:
+                    prefix_title = f"【{s_name.strip()}】" if s_name.strip() else f"#{s_idx+1}"
+                    st.markdown(f"<div style='font-size:14px; margin-bottom:4px;'>📊 {prefix_title} 總留言量、總點讚、總分享 *</div>", unsafe_allow_html=True)
+                    p_col1, p_col2 = st.columns([1.3, 3.2])
+                    with p_col1:
+                        st.text_input(
+                            "直播台前綴",
+                            value=f"{s_name.strip()} -" if s_name.strip() else "(請先填台名) -",
+                            disabled=True,
+                            label_visibility="collapsed",
+                            key=f"ct_mprefix_{fv}_{s_idx}"
+                        )
+                    with p_col2:
+                        s_met_nums = st.text_input(
+                            "留言點讚分享數據",
+                            placeholder="只需填數字，例如：8553-523-325",
+                            label_visibility="collapsed",
+                            key=f"ct_met_{fv}_{s_idx}"
+                        )
+                    st.caption(f"系統將自動組合為：{s_name.strip() or '直播台'}-{s_met_nums.strip() or '留言-點讚-分享'}")
+
+                s_req = st.text_area(
+                    f"📋 直播需求 #{s_idx+1} *",
+                    placeholder="請詳細說明該台直播需求，禁止只打加單關鍵字反饋互動...",
+                    height=85,
+                    key=f"ct_req_{fv}_{s_idx}"
+                )
+                st.caption("請詳細說明直播需求禁止只打加單關鍵字反饋互動，如果每日工作回報內台性那需要調整，就直接協助新增並附上截圖")
+
+                s_img = st.file_uploader(
+                    f"📸 附上【{s_name.strip() or f'第 {s_idx+1} 台'}】直播需求調整截圖 (選填，支援圖片或PDF)",
+                    type=["png", "jpg", "jpeg", "pdf"],
+                    key=f"ct_rimg_{fv}_{s_idx}"
+                )
+
+                s_rmet = st.text_area(
+                    f"✅ 直播需求是否達成 #{s_idx+1} *",
+                    placeholder="請依上題所述需求詳細說明，如未達成請詳述原因...",
+                    height=75,
+                    key=f"ct_rmet_{fv}_{s_idx}"
+                )
+
+                stream_entries.append({
+                    "idx": s_idx + 1,
+                    "name": s_name.strip(),
+                    "url": s_url.strip(),
+                    "opt": s_opt.strip(),
+                    "met_nums": s_met_nums.strip(),
+                    "req": s_req.strip(),
+                    "img": s_img,
+                    "rmet": s_rmet.strip()
+                })
+
+        st_bot_b1, st_bot_b2, _ = st.columns([1.8, 1.4, 3.8])
+        with st_bot_b1:
+            if st.button("➕ 在下方接著新增一台直播台", key="st_add_bot", use_container_width=True):
+                st.session_state.ct_stream_rows += 1
+                st.rerun()
+        with st_bot_b2:
+            if st.button("➖ 移除最後一台直播台", key="st_sub_bot", disabled=(st.session_state.ct_stream_rows <= 1), use_container_width=True):
+                st.session_state.ct_stream_rows = max(1, st.session_state.ct_stream_rows - 1)
+                st.rerun()
 
         # 三、客訴與 8D 區塊
         ct_c_who = ct_c_where = ct_c_when = ct_c_what = ct_c_why = ct_c_how = ""
         if ct_has_comp_chk:
             st.divider()
             st.markdown("#### 三、 🚨 直播中客訴 5W1H 詳細回報（有客訴必填）")
-            st.warning("請依序詳細填寫以下 5W1H 客訴資訊（若有多個直播台請分開備註）：")
+            st.warning("請依序詳細填寫以下 5W1H 客訴資訊（若有多個直播台請註明台名）：")
             cw1, cw2, cw3 = st.columns(3)
             with cw1:
                 ct_c_who = st.text_input("1. 【Who】操台人員姓名 *", value=user["name"], key=f"ct_cwho_{fv}")
             with cw2:
-                ct_c_where = st.text_input("2. 【Where】直播台名稱 *", placeholder="請輸入發生客訴之直播台名稱", key=f"ct_cwhere_{fv}")
+                default_where_names = "、".join([e["name"] for e in stream_entries if e["name"]])
+                ct_c_where = st.text_input("2. 【Where】直播台名稱 *", value=default_where_names, placeholder="請輸入發生客訴之直播台名稱", key=f"ct_cwhere_{fv}")
             with cw3:
                 ct_c_when = st.text_input("3. 【When】發生時間點 (幾點幾分在賴群組反映) *", placeholder="例如：21:35 在賴群組反映", key=f"ct_cwhen_{fv}")
             ct_c_what = st.text_area("4. 【What】客訴問題詳情（客人反應什麼問題／當下發生什麼事） *", height=80, key=f"ct_cwhat_{fv}")
@@ -1145,29 +1237,72 @@ else:
                 ct_8d_name = ct_uploaded_8d.name
                 ct_8d_b64 = base64.b64encode(ct_uploaded_8d.read()).decode("utf-8")
 
-            required_fields = [
-                ct_device.strip(), ct_stream_name.strip(), ct_fanpage_url.strip(),
-                ct_op_time.strip(), ct_metrics.strip(), ct_req.strip(),
-                ct_req_met.strip(), ct_feeling.strip(), ct_sup_remind.strip()
-            ]
-            if not all(required_fields):
-                st.error("❌ 標註「*」號的題目皆為必填！（若無主管提醒改善事項，請在框內輸入『無』，您剛才打的字都還保留在上方框內，補齊後再按送出即可）")
+            # 檢查每一台直播台必填欄位
+            missing_stream_idx = None
+            for entry in stream_entries:
+                if not all([entry["name"], entry["url"], entry["opt"], entry["met_nums"], entry["req"], entry["rmet"]]):
+                    missing_stream_idx = entry["idx"]
+                    break
+
+            if not all([ct_device.strip(), ct_feeling.strip(), ct_sup_remind.strip()]):
+                st.error("❌ 「工作機或賴名稱」、「整體操台感受」、「主管提醒改善事項」皆為必填！（若無主管提醒改善事項，請填『無』）")
+            elif missing_stream_idx is not None:
+                st.error(f"❌ 「第 {missing_stream_idx} 台直播操台紀錄」尚有標註 * 號的欄位未填寫完整！（若多按了不需要的直播台，可點『➖ 移除最後一台』）")
             elif ct_has_other_chk and not ct_tasks_list:
-                st.error("❌ 您勾選了「今日有操台外處理事項」，請至少填寫一列處理事項！（若遠端無操台外協助，請取消上方『今日有操台外處理事項』勾選即可）")
+                st.error("❌ 您勾選了「今日有操台外處理事項」，請至少填寫一列處理事項！（若遠端無操台外協助，請取消上方勾選即可）")
             elif ct_has_comp_chk and not all([ct_c_who.strip(), ct_c_where.strip(), ct_c_when.strip(), ct_c_what.strip(), ct_c_why.strip(), ct_c_how.strip()]):
-                st.error("❌ 您勾選了「今日直播中有客訴」，請將客訴 5W1H（Who / Where / When / What / Why / How）共 6 個欄位填寫完整！")
+                st.error("❌ 您勾選了「今日直播中有客訴」，請將客訴 5W1H 共 6 個欄位填寫完整！")
             elif ct_has_8d_chk and not ct_8d_name:
                 st.error("❌ 您勾選了「重大異常需附 8D 報告檔案」，請務必上傳 8D 檔案！")
             else:
                 with st.spinner("🚀 正在安全傳送您的操台回報資料..."):
                     work_min = calc_minutes(ct_ws, ct_we)
                     work_hr = round(work_min / 60.0, 2)
-                    op_hr = parse_caotai_hours(ct_op_time)
 
-                    img_name, img_b64 = "", ""
-                    if ct_req_img is not None:
-                        img_name = ct_req_img.name
-                        img_b64 = base64.b64encode(ct_req_img.read()).decode("utf-8")
+                    is_multi = len(stream_entries) > 1
+                    names_joined = "、".join([e["name"] for e in stream_entries])
+                    urls_list, opts_list, mets_list, reqs_list, rmets_list = [], [], [], [], []
+                    img_names_list, img_b64_list = [], []
+                    total_op_hr = 0.0
+
+                    for e in stream_entries:
+                        sn = e["name"]
+                        total_op_hr += parse_single_op_hours(e["opt"])
+                        # 若員工不小心自己又打了一次台名前綴，自動去重避免變成「廣天-廣天-8553」
+                        clean_nums = e["met_nums"]
+                        if clean_nums.startswith(f"{sn}-") or clean_nums.startswith(f"{sn} -"):
+                            full_met = clean_nums
+                        else:
+                            full_met = f"{sn}-{clean_nums.lstrip('- ')}"
+
+                        mets_list.append(full_met)
+                        if is_multi:
+                            urls_list.append(f"【{sn}】{e['url']}")
+                            opts_list.append(f"【{sn}】{e['opt']}")
+                            reqs_list.append(f"【{sn}】{e['req']}")
+                            rmets_list.append(f"【{sn}】{e['rmet']}")
+                        else:
+                            urls_list.append(e["url"])
+                            opts_list.append(e["opt"])
+                            reqs_list.append(e["req"])
+                            rmets_list.append(e["rmet"])
+
+                        if e["img"] is not None:
+                            img_names_list.append(f"{sn}_{e['img'].name}")
+                            img_b64_list.append({
+                                "name": f"{sn}_{e['img'].name}",
+                                "b64": base64.b64encode(e["img"].read()).decode("utf-8")
+                            })
+
+                    op_hr = round(total_op_hr, 2)
+                    if len(img_b64_list) == 0:
+                        img_name, img_b64 = "", ""
+                    elif len(img_b64_list) == 1:
+                        img_name = img_b64_list[0]["name"]
+                        img_b64 = img_b64_list[0]["b64"]
+                    else:
+                        img_name = " / ".join(img_names_list)
+                        img_b64 = "MULTI_JSON:" + json.dumps(img_b64_list, ensure_ascii=False)
 
                     clean_cdate = normalize_date_str(ct_date)
                     was_overwritten = delete_existing_same_day_report(ws_caotai, user["username"], clean_cdate)
@@ -1189,13 +1324,13 @@ else:
                         "下班時間": ct_we.strftime("%H:%M"),
                         "上班總分鐘": work_min,
                         "上班總時數(小時)": work_hr,
-                        "直播台名稱": ct_stream_name.strip(),
-                        "直播台粉專網址": ct_fanpage_url.strip(),
-                        "操台時間": ct_op_time.strip(),
+                        "直播台名稱": names_joined,
+                        "直播台粉專網址": "\n".join(urls_list),
+                        "操台時間": "\n".join(opts_list),
                         "操台時數(小時)": op_hr,
-                        "總留言_點讚_分享": ct_metrics.strip(),
-                        "直播需求": ct_req.strip(),
-                        "直播需求是否達成": ct_req_met.strip(),
+                        "總留言_點讚_分享": "\n".join(mets_list),
+                        "直播需求": "\n".join(reqs_list),
+                        "直播需求是否達成": "\n".join(rmets_list),
                         "有無客訴": has_ct_c_str,
                         "客訴_Who": ct_c_who.strip() if ct_has_comp_chk else "",
                         "客訴_Where": ct_c_where.strip() if ct_has_comp_chk else "",
@@ -1220,11 +1355,12 @@ else:
                     clear_all_caches()
 
                     st.session_state.ct_task_rows = 3
+                    st.session_state.ct_stream_rows = 1
                     st.session_state.form_ver += 1
                     if was_overwritten:
-                        st.session_state.submit_success_msg = f"✅ 【覆蓋成功】您於 {clean_cdate} 的操台回報已更新（當日上班時數：{work_hr} 小時 / 操台時數：{op_hr} 小時）！"
+                        st.session_state.submit_success_msg = f"✅ 【覆蓋成功】您於 {clean_cdate} 的操台回報已更新（共 {len(stream_entries)} 台直播｜當日上班時數：{work_hr} 小時 / 累計操台時數：{op_hr} 小時）！"
                     else:
-                        st.session_state.submit_success_msg = f"🎉 【送出成功】您於 {clean_cdate} 的操台回報已送出（當日上班時數：{work_hr} 小時 / 操台時數：{op_hr} 小時）！"
+                        st.session_state.submit_success_msg = f"🎉 【送出成功】您於 {clean_cdate} 的操台回報已送出（共 {len(stream_entries)} 台直播｜當日上班時數：{work_hr} 小時 / 累計操台時數：{op_hr} 小時）！"
                     st.rerun()
 
         st.divider()
@@ -2093,32 +2229,54 @@ else:
                         comp_tag = " 🚨【有直播客訴】" if has_ct_comp else ""
                         b8d_tag = " 📎【附8D報告】" if row.get("有無8D") == "是" else ""
                         img_tag = " 📸【附截圖】" if row.get("需求截圖檔名") else ""
-                        exp_title = f"📅 {row.get('回報日期', '')} ｜ 👤 {row.get('姓名', '')} ｜ 🕒 上下班：{row.get('上班時間', '')}~{row.get('下班時間', '')} (工時：{row.get('上班總時數(小時)', 0)}H) ｜ 🎥 直播台：{row.get('直播台名稱', '')} ｜ ⏱️ 操台：{row.get('操台時間', '')}{comp_tag}{b8d_tag}{img_tag}"
+                        short_opt = str(row.get("操台時間", "")).replace("\n", " / ")
+                        exp_title = f"📅 {row.get('回報日期', '')} ｜ 👤 {row.get('姓名', '')} ｜ 🕒 上下班：{row.get('上班時間', '')}~{row.get('下班時間', '')} (工時：{row.get('上班總時數(小時)', 0)}H) ｜ 🎥 直播台：{row.get('直播台名稱', '')} ｜ ⏱️ 操台：{short_opt}{comp_tag}{b8d_tag}{img_tag}"
 
                         is_editing_ct = (st.session_state.edit_report_id == r_id)
                         with st.expander(exp_title, expanded=(idx == 0 or is_editing_ct)):
                             c1, c2, c3, c4 = st.columns(4)
                             c1.markdown(f"**🕒 上下班時間 (當日工時)**\n\n`{row.get('上班時間', '')} ~ {row.get('下班時間', '')}` (**{row.get('上班總時數(小時)', 0)}** 小時)")
                             c2.markdown(f"**📱 工作機或賴名稱**\n\n`{row.get('工作機或賴名稱', '')}`")
-                            c3.markdown(f"**🎥 直播台名稱 / 粉專**\n\n**{row.get('直播台名稱', '')}**\n({row.get('直播台粉專網址', '')})")
-                            c4.markdown(f"**⏱️ 操台時間 / 互動數據**\n\n操台：`{row.get('操台時間', '')}` ({row.get('操台時數(小時)', 0)}H)\n數據：`{row.get('總留言_點讚_分享', '')}`")
+                            urls_md = "\n".join([f"- {u}" for u in str(row.get("直播台粉專網址", "")).split("\n") if u.strip()])
+                            c3.markdown(f"**🎥 直播台名稱 / 粉專**\n\n**{row.get('直播台名稱', '')}**\n{urls_md}")
+                            opts_md = "\n".join([f"- `{o}`" for o in str(row.get("操台時間", "")).split("\n") if o.strip()])
+                            mets_md = "\n".join([f"- `{m}`" for m in str(row.get("總留言_點讚_分享", "")).split("\n") if m.strip()])
+                            c4.markdown(f"**⏱️ 操台時間 (共 {row.get('操台時數(小時)', 0)}H) / 互動**\n\n{opts_md}\n{mets_md}")
 
                             st.markdown("---")
                             r_c1, r_c2 = st.columns(2)
                             with r_c1:
                                 st.markdown("#### 📋 直播需求")
-                                st.write(row.get("直播需求", ""))
-                                if row.get("需求截圖編碼"):
-                                    b64_img = base64.b64decode(row["需求截圖編碼"])
-                                    st.download_button(
-                                        label=f"📸 下載直播需求截圖 ({row.get('需求截圖檔名', 'image.png')})",
-                                        data=b64_img,
-                                        file_name=f"{r_id}_{row.get('需求截圖檔名', 'image.png')}",
-                                        key=f"dl_ct_img_{r_id}"
-                                    )
+                                for line in str(row.get("直播需求", "")).split("\n"):
+                                    if line.strip():
+                                        st.write(line)
+                                raw_img_b64 = str(row.get("需求截圖編碼", ""))
+                                if raw_img_b64:
+                                    if raw_img_b64.startswith("MULTI_JSON:"):
+                                        try:
+                                            img_items = json.loads(raw_img_b64[len("MULTI_JSON:"):])
+                                            for m_idx, item in enumerate(img_items):
+                                                st.download_button(
+                                                    label=f"📸 下載直播需求截圖 ({item['name']})",
+                                                    data=base64.b64decode(item["b64"]),
+                                                    file_name=f"{r_id}_{item['name']}",
+                                                    key=f"dl_ct_img_{r_id}_{m_idx}"
+                                                )
+                                        except:
+                                            pass
+                                    else:
+                                        b64_img = base64.b64decode(raw_img_b64)
+                                        st.download_button(
+                                            label=f"📸 下載直播需求截圖 ({row.get('需求截圖檔名', 'image.png')})",
+                                            data=b64_img,
+                                            file_name=f"{r_id}_{row.get('需求截圖檔名', 'image.png')}",
+                                            key=f"dl_ct_img_{r_id}"
+                                        )
                             with r_c2:
                                 st.markdown("#### ✅ 直播需求是否達成")
-                                st.write(row.get("直播需求是否達成", ""))
+                                for line in str(row.get("直播需求是否達成", "")).split("\n"):
+                                    if line.strip():
+                                        st.write(line)
 
                             st.markdown("---")
                             st.markdown("#### 🛠️ 操台外處理事項")
@@ -2206,19 +2364,18 @@ else:
                                     with ec4:
                                         ed_ct_we = st.time_input("🕕 下班時間", parse_time_safe(row.get("下班時間", "22:00")), step=60)
 
-                                    ec5, ec6, ec7 = st.columns(3)
+                                    ec5, ec6 = st.columns(2)
                                     with ec5:
                                         ed_ct_dev = st.text_input("📱 工作機或賴名稱", value=str(row.get("工作機或賴名稱", "")))
                                     with ec6:
-                                        ed_ct_sname = st.text_input("🎥 直播台名稱", value=str(row.get("直播台名稱", "")))
-                                    with ec7:
-                                        ed_ct_furl = st.text_input("🔗 直播台粉專網址", value=str(row.get("直播台粉專網址", "")))
+                                        ed_ct_sname = st.text_input("🎥 直播台名稱 (多台以頓號分隔)", value=str(row.get("直播台名稱", "")))
 
+                                    ed_ct_furl = st.text_area("🔗 直播台粉專網址 (多台一行一條)", value=str(row.get("直播台粉專網址", "")), height=65)
                                     ec8, ec9 = st.columns(2)
                                     with ec8:
-                                        ed_ct_optime = st.text_input("⏱️ 操台時間", value=str(row.get("操台時間", "")))
+                                        ed_ct_optime = st.text_area("⏱️ 操台時間 (多台一行一條)", value=str(row.get("操台時間", "")), height=65)
                                     with ec9:
-                                        ed_ct_metrics = st.text_input("📊 總留言量、總點讚、總分享", value=str(row.get("總留言_點讚_分享", "")))
+                                        ed_ct_metrics = st.text_area("📊 總留言量、總點讚、總分享 (多台一行一條)", value=str(row.get("總留言_點讚_分享", "")), height=65)
 
                                     ed_ct_req = st.text_area("📋 直播需求", value=str(row.get("直播需求", "")), height=70)
                                     ed_ct_met = st.text_area("✅ 直播需求是否達成", value=str(row.get("直播需求是否達成", "")), height=60)
@@ -2244,7 +2401,7 @@ else:
                                     ed_ct_sup = st.text_area("📌 主管提醒改善事項", value=str(row.get("主管提醒改善事項", "")) or "無", height=60)
                                     ed_ct_prop = st.text_area("💡 提案改善", value=str(row.get("提案改善", "")), height=60)
 
-                                    save_ct_btn = st.form_submit_button("💾 儲存操台修改內容 (自動重算工時)", type="primary", use_container_width=True)
+                                    save_ct_btn = st.form_submit_button("💾 儲存操台修改內容 (自動重算多台工時)", type="primary", use_container_width=True)
 
                                 if save_ct_btn:
                                     with st.spinner("🔄 正在更新操台回報並重新計算工時..."):
